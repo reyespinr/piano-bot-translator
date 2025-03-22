@@ -3,6 +3,5 @@ token.txt
 *.exe
 *.log
 *.dll
-main.py
 build/main
 .vscode

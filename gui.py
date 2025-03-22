@@ -119,7 +119,7 @@ class Connection:
             if size > min_width:
                 min_width = size
 
-        combobox.setMinimumWidth(min_width + 30)
+        combobox.setMinimumWidth(min_width + 50)
 
     def setEnabled(self, enabled):
         self.devices.setEnabled(enabled)
@@ -244,7 +244,7 @@ class TitleBar(QFrame):
 
         # layout
         layout = QHBoxLayout()
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(0, 0, 0, 10)
         self.setLayout(layout)
 
         # window title
@@ -297,7 +297,7 @@ class GUI(QMainWindow):
         # window info
         self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint)
         window_icon = QIcon("./assets/favicon.ico")
-        self.setWindowTitle("Discord Audio Pipe")
+        self.setWindowTitle("Piano Translator Bot")
         self.app.setWindowIcon(window_icon)
         self.position = None
 
@@ -328,11 +328,11 @@ class GUI(QMainWindow):
         self.connection_btn.setObjectName("connection_btn")
 
         # add widgets
-        self.layout.addWidget(self.info, 0, 0, 1, 3)
+        self.layout.addWidget(self.info, 0, 0, 1, 4)  # Adjusted column span
         self.layout.addWidget(device_lb, 1, 0)
         self.layout.addWidget(server_lb, 1, 1)
         self.layout.addWidget(channel_lb, 1, 2)
-        self.layout.addWidget(self.connection_btn, 2, 4)
+        self.layout.addWidget(self.connection_btn, 1, 3)  # Adjusted position
 
         # events
         self.connection_btn.clicked.connect(self.add_connection)
@@ -383,7 +383,8 @@ class GUI(QMainWindow):
                 new_connection.servers.setRowHidden(idx, True)
 
         self.layout.removeWidget(self.connection_btn)
-        self.layout.addWidget(self.connection_btn, layer, 4)
+        self.layout.addWidget(self.connection_btn, layer,
+                              3)  # Adjusted position
 
         self.connections.append(new_connection)
 

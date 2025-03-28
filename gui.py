@@ -19,6 +19,7 @@ from PyQt5.QtWidgets import (
     QStyledItemDelegate,
     QListView
 )
+from utils import listen_and_process  # Import shared logic
 
 if getattr(sys, "frozen", False):
     bundle_dir = sys._MEIPASS
@@ -87,12 +88,16 @@ class Connection:
         self.record = SVGButton("Record")
         self.record.setObjectName("record")
 
+        # Rename record button to listen
+        self.listen = SVGButton("Listen")
+        self.listen.setObjectName("listen")
+
         # add widgets
         parent.layout.addWidget(self.devices, layer, 0)
         parent.layout.addWidget(self.servers, layer, 1)
         parent.layout.addWidget(self.channels, layer, 2)
         parent.layout.addWidget(self.mute, layer, 3)
-        parent.layout.addWidget(self.record, layer, 4)  # Add record button
+        parent.layout.addWidget(self.listen, layer, 4)  # Add listen button
 
         # events
         self.devices.changed.connect(self.change_device)
@@ -105,8 +110,8 @@ class Connection:
             lambda: asyncio.ensure_future(self.change_channel())
         )
         self.mute.clicked.connect(self.toggle_mute)
-        # Add record button event
-        self.record.clicked.connect(self.toggle_record)
+        # Update event connection for listen button
+        self.listen.clicked.connect(self.toggle_listen)
 
     @staticmethod
     def resize_combobox(combobox):
@@ -217,19 +222,22 @@ class Connection:
         except Exception:
             logging.exception("Error on toggle_mute")
 
-    def toggle_record(self):
+    def toggle_listen(self):
         try:
             if self.parent.bot.voice_clients:
                 vc = self.parent.bot.voice_clients[0]
-                if not self.parent.is_recording:
-                    self.parent.is_recording = True
-                    self.record.setText("Stop")
-                    asyncio.ensure_future(self.parent.start_recording(vc))
+                if not self.parent.is_listening:
+                    self.parent.is_listening = True
+                    self.listen.setText("Stop")
+                    print("Now listening...")  # Debugging statement
+                    asyncio.ensure_future(listen_and_process(
+                        vc, self.parent))  # Pass GUI instance
                 else:
-                    self.parent.is_recording = False
-                    self.record.setText("Record")
+                    self.parent.is_listening = False
+                    self.listen.setText("Listen")
+                    print("Stopped listening.")  # Debugging statement
         except Exception:
-            logging.exception("Error on toggle_record")
+            logging.exception("Error on toggle_listen")
 
 
 class TitleBar(QFrame):
@@ -352,6 +360,7 @@ class GUI(QMainWindow):
         self.show()
 
         self.is_recording = False  # Add recording state
+        self.is_listening = False  # Rename recording state to listening
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:

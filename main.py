@@ -6,6 +6,8 @@ import pyaudio
 import os
 import gui
 from PyQt5.QtWidgets import QApplication, QMessageBox
+from discord.sinks import WaveSink
+import utils
 
 # error logging
 error_formatter = logging.Formatter(
@@ -68,6 +70,43 @@ async def main(bot):
                     vc = await after.channel.connect()
                     print(f"Connected to voice channel: {after.channel}")
                 bot_ui.vc = vc  # Store the voice client in the GUI object
+
+        async def start_listening(vc, gui_instance):
+            """Start recording and processing audio from the voice channel."""
+            sink = WaveSink()
+
+            async def process_audio_callback(sink, channel):
+                """Process audio from the sink."""
+                await process_audio_from_sink(sink, channel, gui_instance)
+
+            vc.start_recording(
+                sink,
+                process_audio_callback,  # Pass the coroutine directly
+                None,
+            )
+            print("Started listening to the voice channel.")
+
+        async def process_audio_from_sink(sink, _, gui_instance):
+            """Process audio from the sink after recording."""
+            for user_id, audio in sink.audio_data.items():
+                temp_audio_file = f"{user_id}_audio.wav"
+                with open(temp_audio_file, "wb") as f:
+                    f.write(audio.file.read())
+
+                # Transcribe and translate the audio
+                transcribed_text = await utils.transcribe(temp_audio_file)
+                translated_text = await utils.translate(transcribed_text)
+
+                # Update the GUI with the results
+                gui_instance.update_text_display(
+                    transcribed_text, translated_text)
+
+                # Clean up the temporary file
+                os.remove(temp_audio_file)
+
+            print("Finished processing audio.")
+
+        bot_ui.start_listening = start_listening  # Expose the function to the GUI
 
         await bot.start(token)
 

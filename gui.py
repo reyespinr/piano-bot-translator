@@ -233,7 +233,7 @@ class Connection:
             logging.exception("Error on toggle_mute")
 
     def toggle_listen(self):
-        """Start or stop real-time audio processing."""
+        """Start or stop listening to the voice channel."""
         try:
             if self.parent.bot.voice_clients:
                 vc = self.parent.bot.voice_clients[0]
@@ -241,12 +241,15 @@ class Connection:
                     self.parent.is_listening = True
                     self.listen.setText("Stop")
                     # Debugging statement
-                    print("Now listening in real-time...")
-                    asyncio.ensure_future(self.process_audio_with_gui(vc))
+                    print("Now listening to the voice channel...")
+                    asyncio.ensure_future(
+                        self.parent.start_listening(vc, self.parent))
                 else:
                     self.parent.is_listening = False
                     self.listen.setText("Listen")
-                    print("Stopped listening.")  # Debugging statement
+                    vc.stop_recording()
+                    # Debugging statement
+                    print("Stopped listening to the voice channel.")
         except Exception:
             logging.exception("Error on toggle_listen")
 

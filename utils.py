@@ -60,7 +60,7 @@ async def transcribe(audio_file_path):
     print(f"Starting transcription for {audio_file_path}...")
 
     # Load Whisper model with GPU support
-    model = whisper.load_model("large-v2", device="cuda")  # Use "cuda" for GPU
+    model = whisper.load_model("base", device="cuda")  # Use "cuda" for GPU
     # Enable fp16 for faster processing
     result = model.transcribe(audio_file_path, fp16=True)
     text = result["text"]

@@ -58,9 +58,10 @@ async def transcribe(audio_file_path):
     # Debugging statement
     print(f"Starting transcription for {audio_file_path}...")
 
-    # Transcribe speech to text using Whisper
-    model = whisper.load_model("base", device="cpu")  # Removed fp16 argument
-    result = model.transcribe(audio_file_path, fp16=False)
+    # Load Whisper model with GPU support
+    model = whisper.load_model("base", device="cuda")  # Use "cuda" for GPU
+    # Enable fp16 for faster processing
+    result = model.transcribe(audio_file_path, fp16=True)
     text = result["text"]
 
     print(f"Transcription complete. Text: {text}")  # Debugging statement

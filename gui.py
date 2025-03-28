@@ -17,9 +17,10 @@ from PyQt5.QtWidgets import (
     QLabel,
     QHBoxLayout,
     QStyledItemDelegate,
-    QListView
+    QListView,
+    QTextEdit  # Add QTextEdit for text display
 )
-from utils import listen_and_process  # Import shared logic
+from utils import process_audio  # Import shared logic
 
 if getattr(sys, "frozen", False):
     bundle_dir = sys._MEIPASS
@@ -230,14 +231,21 @@ class Connection:
                     self.parent.is_listening = True
                     self.listen.setText("Stop")
                     print("Now listening...")  # Debugging statement
-                    asyncio.ensure_future(listen_and_process(
-                        vc, self.parent))  # Pass GUI instance
+                    asyncio.ensure_future(self.process_audio_with_gui(vc))
                 else:
                     self.parent.is_listening = False
                     self.listen.setText("Listen")
                     print("Stopped listening.")  # Debugging statement
         except Exception:
             logging.exception("Error on toggle_listen")
+
+    async def process_audio_with_gui(self, vc):
+        """Process audio and update the GUI with results."""
+        try:
+            transcribed_text, translated_text = await process_audio(vc, self.parent)
+            self.parent.update_text_display(transcribed_text, translated_text)
+        except Exception:
+            logging.exception("Error during process_audio_with_gui")
 
 
 class TitleBar(QFrame):
@@ -331,19 +339,37 @@ class GUI(QMainWindow):
         self.connections = [Connection(2, self)]
         self.connected_servers = set()
 
-        # new connections
-        self.connection_btn = QPushButton("＋", self)
-        self.connection_btn.setObjectName("connection_btn")
+        # Remove connection button logic
+        self.layout.addWidget(self.info, 0, 0, 1, 4)  # Info label at the top
+        self.layout.addWidget(device_lb, 1, 0)  # Device label
+        self.layout.addWidget(server_lb, 1, 1)  # Server label
+        self.layout.addWidget(channel_lb, 1, 2)  # Channel label
 
-        # add widgets
-        self.layout.addWidget(self.info, 0, 0, 1, 4)  # Adjusted column span
-        self.layout.addWidget(device_lb, 1, 0)
-        self.layout.addWidget(server_lb, 1, 1)
-        self.layout.addWidget(channel_lb, 1, 2)
-        self.layout.addWidget(self.connection_btn, 1, 3)  # Adjusted position
+        # Dropdowns and buttons
+        self.layout.addWidget(
+            self.connections[0].devices, 2, 0)  # Devices dropdown
+        self.layout.addWidget(
+            self.connections[0].servers, 2, 1)  # Servers dropdown
+        # Channels dropdown
+        self.layout.addWidget(self.connections[0].channels, 2, 2)
+        self.layout.addWidget(self.connections[0].mute, 2, 3)  # Mute button
+        self.layout.addWidget(
+            self.connections[0].listen, 3, 3)  # Listen button
 
-        # events
-        self.connection_btn.clicked.connect(self.add_connection)
+        # Add separate text display areas for transcribed and translated text
+        self.transcribed_display = QTextEdit()
+        self.transcribed_display.setReadOnly(True)
+        self.transcribed_display.setPlaceholderText("Transcribed Text")
+        self.layout.addWidget(self.transcribed_display, 4,
+                              0, 1, 4)  # Spanning all columns
+
+        self.translated_display = QTextEdit()
+        self.translated_display.setReadOnly(True)
+        self.translated_display.setPlaceholderText("Translated Text")
+        self.layout.addWidget(self.translated_display, 5,
+                              0, 1, 4)  # Spanning all columns
+
+        # Remove connection button event
 
         # build window
         titlebar = TitleBar(self)
@@ -377,25 +403,13 @@ class GUI(QMainWindow):
         event.accept()
 
     def setEnabled(self, enabled):
-        self.connection_btn.setEnabled(enabled)
+        # Remove connection button enable logic
         for connection in self.connections:
             connection.setEnabled(enabled)
 
     def add_connection(self):
-        layer = len(self.connections) + 2
-
-        new_connection = Connection(layer, self)
-        new_connection.set_servers(self.bot.guilds)
-
-        for idx in range(new_connection.servers.count()):
-            if idx in self.connected_servers:
-                new_connection.servers.setRowHidden(idx, True)
-
-        self.layout.removeWidget(self.connection_btn)
-        self.layout.addWidget(self.connection_btn, layer,
-                              3)  # Adjusted position
-
-        self.connections.append(new_connection)
+        # Remove add_connection logic
+        pass
 
     def exclude(self, deselected, selected):
         self.connected_servers.add(selected)
@@ -422,3 +436,8 @@ class GUI(QMainWindow):
         self.connections[0].set_servers(self.bot.guilds)
         Connection.resize_combobox(self.connections[0].servers)
         self.setEnabled(True)
+
+    def update_text_display(self, transcribed_text, translated_text):
+        """Update the text displays with transcribed and translated text."""
+        self.transcribed_display.setPlainText(transcribed_text)
+        self.translated_display.setPlainText(translated_text)

@@ -86,7 +86,7 @@ async def translate(text):
     return translation
 
 
-async def listen_and_process(vc, gui_instance):
+async def process_audio(vc, gui_instance):
     try:
         # Step 1: Listen
         audio_file = await listen(vc, gui_instance)
@@ -98,5 +98,7 @@ async def listen_and_process(vc, gui_instance):
         translated_text = await translate(transcribed_text)
 
         print(f"Final Translation: {translated_text}")  # Debugging statement
+        return transcribed_text, translated_text  # Return both texts
     except Exception as e:
-        logging.exception(f"Error during listen and process: {e}")
+        logging.exception(f"Error during process_audio: {e}")
+        return None, None

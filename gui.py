@@ -21,7 +21,8 @@ from PyQt5.QtWidgets import (
     QTextEdit  # Add QTextEdit for text display
 )
 # Import listen and other functions
-from utils import process_audio, listen, transcribe, translate
+# Import listen_and_transcribe
+from utils import process_audio, listen, transcribe, translate, listen_and_transcribe
 
 if getattr(sys, "frozen", False):
     bundle_dir = sys._MEIPASS
@@ -250,14 +251,13 @@ class Connection:
             logging.exception("Error on toggle_listen")
 
     async def process_audio_with_gui(self, vc):
-        """Process audio and update the GUI."""
+        """Continuously process audio in real-time and update the GUI."""
         try:
-            transcribed_text, translated_text = await process_audio(vc, self.parent)
-            self.parent.update_text_display(transcribed_text, translated_text)
+            await listen_and_transcribe(vc, self.parent)
         except Exception:
             logging.exception("Error during process_audio_with_gui")
         finally:
-            print("Stopped processing.")  # Debugging statement
+            print("Stopped real-time processing.")  # Debugging statement
 
     def clear_text_boxes(self):
         """Clear the transcribed and translated text boxes."""

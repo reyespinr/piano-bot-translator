@@ -5,3 +5,4 @@ token.txt
 *.dll
 build/main
 .vscode
+output.wav

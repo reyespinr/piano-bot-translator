@@ -19,6 +19,7 @@ class AudioRecorder:
 
 
 async def listen(vc, gui_instance):
+    """Capture audio for processing."""
     print("Starting to listen...")  # Debugging statement
 
     p = pyaudio.PyAudio()
@@ -28,7 +29,7 @@ async def listen(vc, gui_instance):
     stream.start_stream()
 
     # Wait until listening is stopped (controlled by GUI button)
-    while gui_instance.is_listening:  # Use GUI's is_listening variable
+    while gui_instance.is_listening:
         await asyncio.sleep(0.1)
 
     stream.stop_stream()

@@ -20,7 +20,8 @@ from PyQt5.QtWidgets import (
     QListView,
     QTextEdit  # Add QTextEdit for text display
 )
-from utils import process_audio  # Import shared logic
+# Import listen and other functions
+from utils import process_audio, listen, transcribe, translate
 
 if getattr(sys, "frozen", False):
     bundle_dir = sys._MEIPASS
@@ -93,12 +94,17 @@ class Connection:
         self.listen = SVGButton("Listen")
         self.listen.setObjectName("listen")
 
+        # Add clear button
+        self.clear = QPushButton("Clear")
+        self.clear.setObjectName("clear")
+
         # add widgets
         parent.layout.addWidget(self.devices, layer, 0)
         parent.layout.addWidget(self.servers, layer, 1)
         parent.layout.addWidget(self.channels, layer, 2)
         parent.layout.addWidget(self.mute, layer, 3)
-        parent.layout.addWidget(self.listen, layer, 4)  # Add listen button
+        parent.layout.addWidget(self.listen, layer, 4)  # Listen button
+        parent.layout.addWidget(self.clear, layer, 5)  # Clear button
 
         # events
         self.devices.changed.connect(self.change_device)
@@ -113,6 +119,8 @@ class Connection:
         self.mute.clicked.connect(self.toggle_mute)
         # Update event connection for listen button
         self.listen.clicked.connect(self.toggle_listen)
+        self.clear.clicked.connect(
+            self.clear_text_boxes)  # Connect clear button
 
     @staticmethod
     def resize_combobox(combobox):
@@ -224,13 +232,15 @@ class Connection:
             logging.exception("Error on toggle_mute")
 
     def toggle_listen(self):
+        """Start or stop real-time audio processing."""
         try:
             if self.parent.bot.voice_clients:
                 vc = self.parent.bot.voice_clients[0]
                 if not self.parent.is_listening:
                     self.parent.is_listening = True
                     self.listen.setText("Stop")
-                    print("Now listening...")  # Debugging statement
+                    # Debugging statement
+                    print("Now listening in real-time...")
                     asyncio.ensure_future(self.process_audio_with_gui(vc))
                 else:
                     self.parent.is_listening = False
@@ -240,12 +250,19 @@ class Connection:
             logging.exception("Error on toggle_listen")
 
     async def process_audio_with_gui(self, vc):
-        """Process audio and update the GUI with results."""
+        """Process audio and update the GUI."""
         try:
             transcribed_text, translated_text = await process_audio(vc, self.parent)
             self.parent.update_text_display(transcribed_text, translated_text)
         except Exception:
             logging.exception("Error during process_audio_with_gui")
+        finally:
+            print("Stopped processing.")  # Debugging statement
+
+    def clear_text_boxes(self):
+        """Clear the transcribed and translated text boxes."""
+        self.parent.transcribed_display.clear()
+        self.parent.translated_display.clear()
 
 
 class TitleBar(QFrame):
@@ -354,7 +371,8 @@ class GUI(QMainWindow):
         self.layout.addWidget(self.connections[0].channels, 2, 2)
         self.layout.addWidget(self.connections[0].mute, 2, 3)  # Mute button
         self.layout.addWidget(
-            self.connections[0].listen, 3, 3)  # Listen button
+            self.connections[0].listen, 3, 2)  # Listen button
+        self.layout.addWidget(self.connections[0].clear, 3, 3)  # Clear button
 
         # Add separate text display areas for transcribed and translated text
         self.transcribed_display = QTextEdit()
@@ -438,6 +456,13 @@ class GUI(QMainWindow):
         self.setEnabled(True)
 
     def update_text_display(self, transcribed_text, translated_text):
-        """Update the text displays with transcribed and translated text."""
-        self.transcribed_display.setPlainText(transcribed_text)
-        self.translated_display.setPlainText(translated_text)
+        """Append new transcriptions and translations to the text displays."""
+        current_transcribed = self.transcribed_display.toPlainText()
+        current_translated = self.translated_display.toPlainText()
+
+        self.transcribed_display.setPlainText(
+            f"{current_transcribed}\n{transcribed_text}".strip()
+        )
+        self.translated_display.setPlainText(
+            f"{current_translated}\n{translated_text}".strip()
+        )

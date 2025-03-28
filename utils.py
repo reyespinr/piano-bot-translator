@@ -108,8 +108,8 @@ async def process_audio(vc, gui_instance):
 
 
 async def listen_and_transcribe(vc, gui_instance):
-    """Continuously capture audio and transcribe it after detecting a pause."""
-    print("Starting real-time transcription with pause detection...")  # Debugging statement
+    """Continuously capture audio, transcribe it after detecting a pause, and translate it."""
+    print("Starting real-time transcription with pause detection and translation...")  # Debugging statement
 
     p = pyaudio.PyAudio()
     recorder = AudioRecorder()
@@ -143,11 +143,17 @@ async def listen_and_transcribe(vc, gui_instance):
 
                 # Check for silence
                 if is_silent(audio_chunk, threshold=silence_threshold):
-                    print("Detected pause, processing transcription...")
+                    print("Detected pause, processing transcription and translation...")
 
                     # Combine the entire buffer into a single audio chunk for transcription
                     full_audio_chunk = b''.join(buffer)
                     buffer = []  # Clear the buffer after processing
+
+                    # Skip processing if the buffer is empty
+                    if not full_audio_chunk:
+                        print(
+                            "Buffer is empty, skipping transcription and translation.")
+                        continue
 
                     # Save the chunk to a temporary file
                     temp_file = "temp_chunk.wav"
@@ -160,12 +166,23 @@ async def listen_and_transcribe(vc, gui_instance):
 
                     # Transcribe the chunk
                     result = model.transcribe(temp_file, fp16=True)
-                    transcribed_text = result["text"]
+                    transcribed_text = result["text"].strip()
 
-                    # Update the GUI with the transcribed text
-                    gui_instance.update_text_display(transcribed_text, "")
+                    # Skip translation if the transcription is empty
+                    if not transcribed_text:
+                        print("Transcription is empty, skipping translation.")
+                        continue
+
+                    # Translate the transcribed text
+                    translated_text = await translate(transcribed_text)
+
+                    # Update the GUI with the transcribed and translated text
+                    gui_instance.update_text_display(
+                        transcribed_text, translated_text)
                     # Debugging statement
                     print(f"Transcribed: {transcribed_text}")
+                    # Debugging statement
+                    print(f"Translated: {translated_text}")
 
     except Exception as e:
         logging.exception(f"Error during listen_and_transcribe: {e}")
@@ -174,7 +191,8 @@ async def listen_and_transcribe(vc, gui_instance):
         stream.stop_stream()
         stream.close()
         p.terminate()
-        print("Stopped real-time transcription.")  # Debugging statement
+        # Debugging statement
+        print("Stopped real-time transcription and translation.")
 
 
 def is_silent(audio_chunk, threshold=200):

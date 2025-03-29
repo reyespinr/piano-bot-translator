@@ -56,29 +56,101 @@ async def main(bot):
             print(f'Logged in as {bot.user}')
             print("Bot is ready and waiting for voice state updates...")
 
+            # Check if the bot is already connected to a voice channel
+            if bot.voice_clients:
+                vc = bot.voice_clients[0]
+                bot_ui.vc = vc  # Assign the voice client to the GUI instance
+                print(f"Bot is connected to voice channel: {vc.channel.name}")
+
+                # Populate the connected_users list
+                bot_ui.connected_users = [
+                    member for member in vc.channel.members if member.id != bot.user.id
+                ]
+                print(
+                    f"Connected users: {[user.display_name for user in bot_ui.connected_users]}")
+
+                # Spawn listeners for all users in the channel if listening is toggled on
+                if bot_ui.is_listening:
+                    for member in vc.channel.members:
+                        # Ignore the bot itself
+                        if member.id == bot.user.id:
+                            print(
+                                f"Ignoring bot itself: {member.display_name} (ID: {member.id})")
+                            continue
+
+                        # Start a listener for the user
+                        if member.id not in bot_ui.active_listeners:
+                            print(
+                                f"Spawning listener for user: {member.display_name} (ID: {member.id})")
+                            bot_ui.active_listeners[member.id] = asyncio.create_task(
+                                utils.user_listener(vc, member.id, bot_ui)
+                            )
+                            print(
+                                f"Started listener for user: {member.display_name} (ID: {member.id})")
+
         @bot.event
         async def on_voice_state_update(member, before, after):
             print("Voice state update detected...")  # Debugging statement
 
-            # Check if a channel is selected in the GUI
-            selected_channel = bot_ui.connections[0].channels.currentData()
-            if selected_channel is None:
-                print("No channel selected in the GUI. Ignoring voice state update.")
+            # Handle the bot moving to a new channel
+            if member.id == bot.user.id and before.channel != after.channel:
+                print(
+                    f"Bot moved to a new channel: {after.channel.name if after.channel else 'None'}")
+                if after.channel:
+                    bot_ui.connected_users = [
+                        member for member in after.channel.members if member.id != bot.user.id
+                    ]
+                    print(
+                        f"Updated connected_users list for new channel: {[user.display_name for user in bot_ui.connected_users]}")
+                else:
+                    bot_ui.connected_users = []
+                    print(
+                        "Bot is no longer in a voice channel. Connected users cleared.")
+
+            # Ignore the bot itself for other updates
+            if member.id == bot.user.id:
+                print("Ignoring voice state update for the bot itself.")
                 return
 
-            # Proceed only if the selected channel matches the user's new channel
-            if after.channel is not None and after.channel == selected_channel:
-                print(
-                    f"User {member} joined the selected voice channel: {after.channel}")
-                if bot.voice_clients:
-                    vc = bot.voice_clients[0]
-                    if vc.channel != after.channel:
-                        await vc.move_to(after.channel)
-                        print(f"Moved to voice channel: {after.channel}")
-                else:
-                    vc = await after.channel.connect()
-                    print(f"Connected to voice channel: {after.channel}")
-                bot_ui.vc = vc  # Store the voice client in the GUI object
+            # Check if the bot is connected to a voice channel
+            if bot_ui.vc and bot_ui.vc.channel:
+                current_channel = bot_ui.vc.channel
+
+                # Handle users joining the channel
+                if after.channel == current_channel:
+                    if member not in bot_ui.connected_users:
+                        bot_ui.connected_users.append(member)
+                        print(
+                            f"User {member.display_name} added to connected_users list.")
+                        print(
+                            f"Updated connected_users list: {[user.display_name for user in bot_ui.connected_users]}")
+
+                        # If listening is active, spawn a listener for the new user
+                        if bot_ui.is_listening:
+                            print(
+                                f"Listening is active. Spawning listener for user: {member.display_name} (ID: {member.id})")
+                            bot_ui.active_listeners[member.id] = asyncio.create_task(
+                                utils.user_listener(
+                                    bot_ui.vc, member.id, bot_ui)
+                            )
+                            print(
+                                f"Started listener for user: {member.display_name} (ID: {member.id})")
+
+                # Handle users leaving the channel
+                if before.channel == current_channel and after.channel != current_channel:
+                    if member in bot_ui.connected_users:
+                        bot_ui.connected_users.remove(member)
+                        print(
+                            f"User {member.display_name} removed from connected_users list.")
+                        print(
+                            f"Updated connected_users list: {[user.display_name for user in bot_ui.connected_users]}")
+
+                        # Stop the listener for the user if it exists
+                        if member.id in bot_ui.active_listeners:
+                            bot_ui.active_listeners[member.id].cancel()
+                            del bot_ui.active_listeners[member.id]
+                            print(
+                                f"Stopped listener for user: {member.display_name} (ID: {member.id})")
 
         async def start_listening(vc, gui_instance):
             """Start recording and processing audio from the voice channel."""
@@ -86,7 +158,38 @@ async def main(bot):
 
             async def process_audio_callback(sink, channel):
                 """Process audio from the sink."""
-                await process_audio_from_sink(sink, channel, gui_instance)
+                for user_id, audio in sink.audio_data.items():
+                    # Save the audio to a temporary file
+                    temp_audio_file = f"{user_id}_audio.wav"
+                    with open(temp_audio_file, "wb") as f:
+                        f.write(audio.file.read())
+
+                    # Transcribe and translate the audio
+                    transcribed_text = await utils.transcribe(temp_audio_file)
+                    translated_text = await utils.translate(transcribed_text)
+
+                    # Get the user's name or mention
+                    user = sink.vc.guild.get_member(user_id)
+                    if user:
+                        user_name = user.display_name  # Use the display name
+                    else:
+                        # Fallback: Try fetching the member if not in cache
+                        try:
+                            user = await sink.vc.guild.fetch_member(user_id)
+                            user_name = user.display_name
+                        except discord.NotFound:
+                            user_name = f"Unknown User ({user_id})"
+
+                    # Update the GUI with the results, including the user's name
+                    gui_instance.update_text_display(
+                        f"{user_name}: {transcribed_text}",
+                        f"{user_name}: {translated_text}"
+                    )
+
+                    # Clean up the temporary file
+                    os.remove(temp_audio_file)
+
+                print("Finished processing audio.")
 
             vc.start_recording(
                 sink,
@@ -94,45 +197,6 @@ async def main(bot):
                 None,
             )
             print("Started listening to the voice channel.")
-
-        async def process_audio_from_sink(sink, _, gui_instance):
-            """Process audio from the sink after recording."""
-            for user_id, audio in sink.audio_data.items():
-                # Save the audio to a temporary file
-                temp_audio_file = f"{user_id}_audio.wav"
-                with open(temp_audio_file, "wb") as f:
-                    f.write(audio.file.read())
-
-                # Transcribe and translate the audio
-                transcribed_text = await utils.transcribe(temp_audio_file)
-                translated_text = await utils.translate(transcribed_text)
-
-                # Get the user's name or mention
-                user = sink.vc.guild.get_member(user_id)
-                if user:
-                    user_name = user.display_name  # Use the display name
-                else:
-                    # Fallback: Try fetching the member if not in cache
-                    try:
-                        user = await sink.vc.guild.fetch_member(user_id)
-                        user_name = user.display_name
-                    except discord.NotFound:
-                        user_name = f"Unknown User ({user_id})"
-
-                print(f"Guild: {sink.vc.guild.name}")
-                print(f"User ID: {user_id}")
-                print(f"User: {user}")
-
-                # Update the GUI with the results, including the user's name
-                gui_instance.update_text_display(
-                    f"{user_name}: {transcribed_text}",
-                    f"{user_name}: {translated_text}"
-                )
-
-                # Clean up the temporary file
-                os.remove(temp_audio_file)
-
-            print("Finished processing audio.")
 
         bot_ui.start_listening = start_listening  # Expose the function to the GUI
 

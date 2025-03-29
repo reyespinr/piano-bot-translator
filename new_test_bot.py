@@ -48,7 +48,7 @@ async def once_done(sink: discord.sinks, channel: discord.TextChannel, *args):
         )
 
         # Clean up the temporary audio file
-        os.remove(temp_audio_file)
+        # os.remove(temp_audio_file)
 
 
 @bot.command()

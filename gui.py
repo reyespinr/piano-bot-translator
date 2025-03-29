@@ -22,7 +22,8 @@ from PyQt5.QtWidgets import (
 )
 # Import listen and other functions
 # Import listen_and_transcribe
-from utils import process_audio, listen, transcribe, translate, listen_and_transcribe
+import utils
+from discord.sinks import WaveSink
 
 if getattr(sys, "frozen", False):
     bundle_dir = sys._MEIPASS
@@ -201,23 +202,37 @@ class Connection:
                 else:
                     await self.voice.move_to(selection)
 
-                not_playing = (
-                    self.devices.currentData() is not None
-                    and not self.voice.is_playing()
-                )
-
-                if not_playing:
-                    self.voice.play(self.stream)
+                self.parent.vc = self.voice  # Assign the voice client to the GUI instance
+                print(f"Connected to voice channel: {self.voice.channel.name}")
 
             else:
                 if self.voice is not None:
                     await self.voice.disconnect()
+                    self.parent.vc = None
+                    print("Disconnected from the voice channel.")
 
         except Exception:
             logging.exception("Error on change_channel")
 
         finally:
             self.setEnabled(True)
+
+    async def handle_bot_movement(self, new_channel):
+        try:
+            if new_channel is not None:
+                self.parent.vc = self.voice  # Update the voice client
+                self.parent.connected_users = [
+                    member for member in new_channel.members if member.id != self.parent.bot.user.id
+                ]
+                print(
+                    f"Bot moved to a new channel: {new_channel.name}")
+                print(
+                    f"Updated connected_users list for new channel: {[user.display_name for user in self.parent.connected_users]}")
+            else:
+                self.parent.connected_users = []
+                print("Bot is no longer in a voice channel. Connected users cleared.")
+        except Exception:
+            logging.exception("Error handling bot movement")
 
     def toggle_mute(self):
         try:
@@ -233,25 +248,34 @@ class Connection:
             logging.exception("Error on toggle_mute")
 
     def toggle_listen(self):
-        """Start or stop listening to the voice channel."""
-        try:
-            if self.parent.bot.voice_clients:
-                vc = self.parent.bot.voice_clients[0]
-                if not self.parent.is_listening:
-                    self.parent.is_listening = True
-                    self.listen.setText("Stop")
-                    # Debugging statement
-                    print("Now listening to the voice channel...")
-                    asyncio.ensure_future(
-                        self.parent.start_listening(vc, self.parent))
-                else:
-                    self.parent.is_listening = False
-                    self.listen.setText("Listen")
-                    vc.stop_recording()
-                    # Debugging statement
-                    print("Stopped listening to the voice channel.")
-        except Exception:
-            logging.exception("Error on toggle_listen")
+        if self.parent.is_listening:
+            # Stop listening
+            self.parent.is_listening = False
+            print("Listening toggled OFF.")
+            if self.parent.vc:
+                self.parent.vc.stop_recording()
+            print("All listeners have been stopped.")
+
+            # Update button text and style
+            self.listen.setText("Listen")
+            self.listen.setStyleSheet("")  # Reset to default style
+        else:
+            # Start listening
+            self.parent.is_listening = True
+            print("Listening toggled ON.")
+
+            # Update button text and style
+            self.listen.setText("Stop")
+            self.listen.setStyleSheet("background-color: red; color: white;")
+
+            # Start recording using WaveSink
+            if self.parent.vc:
+                self.parent.vc.start_recording(
+                    WaveSink(),
+                    self.parent.process_audio_callback,
+                    None,
+                )
+                print("Started recording audio.")
 
     async def process_audio_with_gui(self, vc):
         """Continuously process audio in real-time and update the GUI."""
@@ -266,6 +290,39 @@ class Connection:
         """Clear the transcribed and translated text boxes."""
         self.parent.transcribed_display.clear()
         self.parent.translated_display.clear()
+
+    async def process_audio_callback(self, sink, channel):
+        """Process audio data for each user."""
+        for user_id, audio in sink.audio_data.items():
+            # Debugging statement
+            print(f"Processing audio for user {user_id}...")
+
+            # Save the audio to a temporary file
+            temp_audio_file = f"{user_id}_audio.wav"
+            with open(temp_audio_file, "wb") as f:
+                f.write(audio.file.read())
+
+            # Debugging statement
+            print(f"Saved audio for user {user_id} to {temp_audio_file}")
+
+            # Transcribe and translate the audio
+            transcribed_text = await utils.transcribe(temp_audio_file)
+            translated_text = await utils.translate(transcribed_text)
+
+            # Get the user's name or mention
+            user = self.vc.guild.get_member(user_id)
+            user_name = user.display_name if user else f"Unknown User ({user_id})"
+
+            # Update the GUI with the results
+            self.update_text_display(
+                f"{user_name}: {transcribed_text}",
+                f"{user_name}: {translated_text}"
+            )
+
+            # Clean up the temporary file
+            os.remove(temp_audio_file)
+
+        print("Finished processing audio.")  # Debugging statement
 
 
 class TitleBar(QFrame):
@@ -339,6 +396,7 @@ class GUI(QMainWindow):
 
         # discord
         self.bot = bot
+        self.vc = None  # Initialize the voice client attribute
 
         # layout
         central = QWidget()
@@ -408,6 +466,8 @@ class GUI(QMainWindow):
 
         self.is_recording = False  # Add recording state
         self.is_listening = False  # Rename recording state to listening
+        self.active_listeners = {}  # Track active listeners for each user
+        self.connected_users = []  # List to track users in the voice channel
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -469,3 +529,37 @@ class GUI(QMainWindow):
         self.translated_display.setPlainText(
             f"{current_translated}\n{translated_text}".strip()
         )
+
+    async def process_audio_callback(self, sink, channel):
+        """Process audio data for each user."""
+        for user_id, audio in sink.audio_data.items():
+            # Debugging statement
+            print(f"Processing audio for user {user_id}...")
+
+            # Save the audio to a temporary file
+            temp_audio_file = f"{user_id}_audio.wav"
+            with open(temp_audio_file, "wb") as f:
+                f.write(audio.file.read())
+
+            # Debugging statement
+            print(f"Saved audio for user {user_id} to {temp_audio_file}")
+
+            # Transcribe and translate the audio
+            transcribed_text = await utils.transcribe(temp_audio_file)
+            # translated_text = await utils.translate(transcribed_text)
+            translated_text = "lmao"  # Placeholder for testing
+
+            # Get the user's name or mention
+            user = self.vc.guild.get_member(user_id)
+            user_name = user.display_name if user else f"Unknown User ({user_id})"
+
+            # Update the GUI with the results
+            self.update_text_display(
+                f"{user_name}: {transcribed_text}",
+                f"{user_name}: {translated_text}"
+            )
+
+            # Clean up the temporary file
+            # os.remove(temp_audio_file)
+
+        print("Finished processing audio.")  # Debugging statement

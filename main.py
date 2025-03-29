@@ -98,6 +98,7 @@ async def main(bot):
         async def process_audio_from_sink(sink, _, gui_instance):
             """Process audio from the sink after recording."""
             for user_id, audio in sink.audio_data.items():
+                # Save the audio to a temporary file
                 temp_audio_file = f"{user_id}_audio.wav"
                 with open(temp_audio_file, "wb") as f:
                     f.write(audio.file.read())
@@ -106,9 +107,27 @@ async def main(bot):
                 transcribed_text = await utils.transcribe(temp_audio_file)
                 translated_text = await utils.translate(transcribed_text)
 
-                # Update the GUI with the results
+                # Get the user's name or mention
+                user = sink.vc.guild.get_member(user_id)
+                if user:
+                    user_name = user.display_name  # Use the display name
+                else:
+                    # Fallback: Try fetching the member if not in cache
+                    try:
+                        user = await sink.vc.guild.fetch_member(user_id)
+                        user_name = user.display_name
+                    except discord.NotFound:
+                        user_name = f"Unknown User ({user_id})"
+
+                print(f"Guild: {sink.vc.guild.name}")
+                print(f"User ID: {user_id}")
+                print(f"User: {user}")
+
+                # Update the GUI with the results, including the user's name
                 gui_instance.update_text_display(
-                    transcribed_text, translated_text)
+                    f"{user_name}: {transcribed_text}",
+                    f"{user_name}: {translated_text}"
+                )
 
                 # Clean up the temporary file
                 os.remove(temp_audio_file)
@@ -138,7 +157,8 @@ async def main(bot):
 
 # run program
 intents = discord.Intents.default()
-intents.voice_states = True  # Ensure the bot has the necessary intent
+intents.voice_states = True  # Ensure the bot can track voice state updates
+intents.members = True  # Add this to allow fetching member information
 bot = discord.Client(intents=intents)
 loop = asyncio.get_event_loop_policy().get_event_loop()
 

@@ -59,8 +59,17 @@ async def main(bot):
         @bot.event
         async def on_voice_state_update(member, before, after):
             print("Voice state update detected...")  # Debugging statement
-            if after.channel is not None and after.channel != before.channel:
-                print(f"User {member} joined voice channel {after.channel}")
+
+            # Check if a channel is selected in the GUI
+            selected_channel = bot_ui.connections[0].channels.currentData()
+            if selected_channel is None:
+                print("No channel selected in the GUI. Ignoring voice state update.")
+                return
+
+            # Proceed only if the selected channel matches the user's new channel
+            if after.channel is not None and after.channel == selected_channel:
+                print(
+                    f"User {member} joined the selected voice channel: {after.channel}")
                 if bot.voice_clients:
                     vc = bot.voice_clients[0]
                     if vc.channel != after.channel:

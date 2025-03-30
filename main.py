@@ -152,54 +152,6 @@ async def main(bot):
                             print(
                                 f"Stopped listener for user: {member.display_name} (ID: {member.id})")
 
-        async def start_listening(vc, gui_instance):
-            """Start recording and processing audio from the voice channel."""
-            sink = WaveSink()
-
-            async def process_audio_callback(sink, channel):
-                """Process audio from the sink."""
-                for user_id, audio in sink.audio_data.items():
-                    # Save the audio to a temporary file
-                    temp_audio_file = f"{user_id}_audio.wav"
-                    with open(temp_audio_file, "wb") as f:
-                        f.write(audio.file.read())
-
-                    # Transcribe and translate the audio
-                    transcribed_text = await utils.transcribe(temp_audio_file)
-                    translated_text = await utils.translate(transcribed_text)
-
-                    # Get the user's name or mention
-                    user = sink.vc.guild.get_member(user_id)
-                    if user:
-                        user_name = user.display_name  # Use the display name
-                    else:
-                        # Fallback: Try fetching the member if not in cache
-                        try:
-                            user = await sink.vc.guild.fetch_member(user_id)
-                            user_name = user.display_name
-                        except discord.NotFound:
-                            user_name = f"Unknown User ({user_id})"
-
-                    # Update the GUI with the results, including the user's name
-                    gui_instance.update_text_display(
-                        f"{user_name}: {transcribed_text}",
-                        f"{user_name}: {translated_text}"
-                    )
-
-                    # Clean up the temporary file
-                    os.remove(temp_audio_file)
-
-                print("Finished processing audio.")
-
-            vc.start_recording(
-                sink,
-                process_audio_callback,  # Pass the coroutine directly
-                None,
-            )
-            print("Started listening to the voice channel.")
-
-        bot_ui.start_listening = start_listening  # Expose the function to the GUI
-
         await bot.start(token)
 
     except FileNotFoundError:

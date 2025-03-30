@@ -4,6 +4,8 @@ import sound
 import asyncio
 import logging
 import discord
+import threading
+import time
 from PyQt5.QtSvg import QSvgWidget
 from PyQt5.QtGui import QFontDatabase, QFontMetrics, QIcon
 from PyQt5.QtCore import Qt, QCoreApplication, QEventLoop, QDir, pyqtSignal
@@ -24,6 +26,7 @@ from PyQt5.QtWidgets import (
 # Import listen_and_transcribe
 import utils
 from discord.sinks import WaveSink
+from custom_sink import RealTimeWaveSink  # Import the custom sink
 
 if getattr(sys, "frozen", False):
     bundle_dir = sys._MEIPASS
@@ -251,34 +254,53 @@ class Connection:
             logging.exception("Error on toggle_mute")
 
     def toggle_listen(self):
-        if self.parent.is_listening:
-            # Stop listening
-            self.parent.is_listening = False
-            print("Listening toggled OFF.")
-            if self.parent.vc:
-                self.parent.vc.stop_recording()
-            print("All listeners have been stopped.")
+        try:
+            if self.parent.is_listening:
+                # Stop listening
+                self.parent.is_listening = False
+                print("Listening toggled OFF.")
+                if self.parent.vc:
+                    self.parent.vc.stop_recording()
+                print("All listeners have been stopped.")
 
-            # Update button text and style
-            self.listen.setText("Listen")
-            self.listen.setStyleSheet("")  # Reset to default style
-        else:
-            # Start listening
-            self.parent.is_listening = True
-            print("Listening toggled ON.")
+                # Update button text and style
+                self.listen.setText("Listen")
+                self.listen.setStyleSheet("")  # Reset to default style
+            else:
+                # Start listening
+                self.parent.is_listening = True
+                print("Listening toggled ON.")
 
-            # Update button text and style
-            self.listen.setText("Stop")
-            self.listen.setStyleSheet("background-color: red; color: white;")
+                # Update button text and style
+                self.listen.setText("Stop")
+                self.listen.setStyleSheet(
+                    "background-color: red; color: white;")
 
-            # Start recording using WaveSink
-            if self.parent.vc:
-                self.parent.vc.start_recording(
-                    WaveSink(),
-                    self.parent.process_audio_callback,
-                    None,
-                )
-                print("Started recording audio.")
+                # Start recording using RealTimeWaveSink
+                if self.parent.vc:
+                    try:
+                        # Create the sink with a reference to the parent GUI
+                        sink = RealTimeWaveSink(
+                            pause_threshold=1.0,
+                            event_loop=asyncio.get_event_loop()
+                        )
+                        # Add a reference to the parent GUI
+                        sink.parent = self.parent
+
+                        self.parent.vc.start_recording(
+                            sink,
+                            self.parent.process_audio_callback,
+                            None,
+                        )
+                        print("Started recording audio.")
+                    except Exception as e:
+                        print(f"Error starting recording: {e}")
+                        # Reset state
+                        self.parent.is_listening = False
+                        self.listen.setText("Listen")
+                        self.listen.setStyleSheet("")
+        except Exception as e:
+            print(f"Error in toggle_listen: {e}")
 
     def clear_text_boxes(self):
         """Clear the transcribed and translated text boxes."""
@@ -430,6 +452,9 @@ class GUI(QMainWindow):
         self.active_listeners = {}  # Track active listeners for each user
         self.connected_users = []  # List to track users in the voice channel
 
+        # Add this line to the __init__ method of the GUI class
+        self.setup_exception_handling()
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.position = event.pos()
@@ -484,34 +509,80 @@ class GUI(QMainWindow):
 
     async def process_audio_callback(self, sink, channel):
         """Process audio data for each user."""
-        for user_id, audio in sink.audio_data.items():
-            # Debugging statement
-            print(f"Processing audio for user {user_id}...")
+        # for user_id, audio in sink.audio_data.items():
+        #     # Debugging statement
+        #     print(f"Processing audio for user {user_id}...")
 
-            # Save the audio to a temporary file
-            temp_audio_file = f"{user_id}_audio.wav"
-            with open(temp_audio_file, "wb") as f:
-                f.write(audio.file.read())
+        #     # Save the audio to a temporary file
+        #     temp_audio_file = f"{user_id}_audio.wav"
+        #     with open(temp_audio_file, "wb") as f:
+        #         f.write(audio.file.read())
 
-            # Debugging statement
-            print(f"Saved audio for user {user_id} to {temp_audio_file}")
+        #     # Debugging statement
+        #     print(f"Saved audio for user {user_id} to {temp_audio_file}")
 
-            # Transcribe and translate the audio
-            transcribed_text = await utils.transcribe(temp_audio_file)
-            # translated_text = await utils.translate(transcribed_text)
-            translated_text = "lmao"  # Placeholder for testing
+        #     # Transcribe and translate the audio
+        #     # transcribed_text = await utils.transcribe(temp_audio_file)
+        #     # translated_text = await utils.translate(transcribed_text)
+        #     translated_text = "lmao"  # Placeholder for testing
 
-            # Get the user's name or mention
-            user = self.vc.guild.get_member(user_id)
-            user_name = user.display_name if user else f"Unknown User ({user_id})"
+        #     # Get the user's name or mention
+        #     user = self.vc.guild.get_member(user_id)
+        #     user_name = user.display_name if user else f"Unknown User ({user_id})"
 
-            # Update the GUI with the results
-            self.update_text_display(
-                f"{user_name}: {transcribed_text}",
-                f"{user_name}: {translated_text}"
-            )
+        #     # Update the GUI with the results
+        #     # self.update_text_display(
+        #     #     f"{user_name}: {transcribed_text}",
+        #     #     f"{user_name}: {translated_text}"
+        #     # )
 
-            # Clean up the temporary file
-            # os.remove(temp_audio_file)
+        #     # Clean up the temporary file
+        #     # os.remove(temp_audio_file)
 
         print("Finished processing audio.")  # Debugging statement
+
+    async def handle_voice_client_error(self):
+        """Handles voice client errors and attempts to reconnect."""
+        print("Voice client thread crashed. Attempting to restart...")
+
+        # Stop recording if still active
+        if self.is_listening and self.vc:
+            self.vc.stop_recording()
+
+        # Short delay to allow cleanup
+        await asyncio.sleep(1)
+
+        # Toggle recording back on if it was active
+        if self.is_listening:
+            print("Restarting recording...")
+
+            # Create a fresh sink instance
+            sink = RealTimeWaveSink(
+                pause_threshold=1.0,
+                event_loop=asyncio.get_event_loop()
+            )
+            sink.parent = self
+
+            # Start recording again
+            self.vc.start_recording(
+                sink,
+                self.process_audio_callback,
+                None
+            )
+            print("Recording restarted successfully")
+
+    # Add this to the GUI class
+    def setup_exception_handling(self):
+        """Setup global exception handling for the Discord audio thread."""
+        self.original_excepthook = sys.excepthook
+
+        def custom_exception_handler(exc_type, exc_value, exc_traceback):
+            # Check if it's the audio thread error we're looking for
+            if isinstance(exc_value, IndexError) and "strip_header_ext" in str(exc_traceback):
+                print("Caught Discord audio thread crash. Attempting recovery...")
+                asyncio.create_task(self.handle_voice_client_error())
+
+            # Still call the original exception handler
+            self.original_excepthook(exc_type, exc_value, exc_traceback)
+
+        sys.excepthook = custom_exception_handler

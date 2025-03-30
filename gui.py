@@ -277,52 +277,10 @@ class Connection:
                 )
                 print("Started recording audio.")
 
-    async def process_audio_with_gui(self, vc):
-        """Continuously process audio in real-time and update the GUI."""
-        try:
-            await listen_and_transcribe(vc, self.parent)
-        except Exception:
-            logging.exception("Error during process_audio_with_gui")
-        finally:
-            print("Stopped real-time processing.")  # Debugging statement
-
     def clear_text_boxes(self):
         """Clear the transcribed and translated text boxes."""
         self.parent.transcribed_display.clear()
         self.parent.translated_display.clear()
-
-    async def process_audio_callback(self, sink, channel):
-        """Process audio data for each user."""
-        for user_id, audio in sink.audio_data.items():
-            # Debugging statement
-            print(f"Processing audio for user {user_id}...")
-
-            # Save the audio to a temporary file
-            temp_audio_file = f"{user_id}_audio.wav"
-            with open(temp_audio_file, "wb") as f:
-                f.write(audio.file.read())
-
-            # Debugging statement
-            print(f"Saved audio for user {user_id} to {temp_audio_file}")
-
-            # Transcribe and translate the audio
-            transcribed_text = await utils.transcribe(temp_audio_file)
-            translated_text = await utils.translate(transcribed_text)
-
-            # Get the user's name or mention
-            user = self.vc.guild.get_member(user_id)
-            user_name = user.display_name if user else f"Unknown User ({user_id})"
-
-            # Update the GUI with the results
-            self.update_text_display(
-                f"{user_name}: {transcribed_text}",
-                f"{user_name}: {translated_text}"
-            )
-
-            # Clean up the temporary file
-            os.remove(temp_audio_file)
-
-        print("Finished processing audio.")  # Debugging statement
 
 
 class TitleBar(QFrame):
@@ -482,15 +440,6 @@ class GUI(QMainWindow):
     def mouseReleaseEvent(self, event):
         self.position = None
         event.accept()
-
-    def setEnabled(self, enabled):
-        # Remove connection button enable logic
-        for connection in self.connections:
-            connection.setEnabled(enabled)
-
-    def add_connection(self):
-        # Remove add_connection logic
-        pass
 
     def exclude(self, deselected, selected):
         self.connected_servers.add(selected)

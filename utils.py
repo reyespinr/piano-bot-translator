@@ -2,14 +2,19 @@ import whisper
 import requests
 
 
+# Preload the Whisper model globally
+print("Loading Whisper model...")
+MODEL = whisper.load_model(
+    "large-v3-turbo", device="cuda")  # Use "cuda" for GPU
+print("Whisper model loaded successfully!")
+
+
 async def transcribe(audio_file_path):
     # Debugging statement
     print(f"Starting transcription for {audio_file_path}...")
 
-    # Load Whisper model with GPU support
-    model = whisper.load_model("base", device="cuda")  # Use "cuda" for GPU
-    # Enable fp16 for faster processing
-    result = model.transcribe(audio_file_path, fp16=True)
+    # Use the preloaded model for transcription
+    result = MODEL.transcribe(audio_file_path, fp16=True)
     text = result["text"]
 
     print(f"Transcription complete. Text: {text}")  # Debugging statement

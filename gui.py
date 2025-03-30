@@ -205,6 +205,9 @@ class Connection:
                 self.parent.vc = self.voice  # Assign the voice client to the GUI instance
                 print(f"Connected to voice channel: {self.voice.channel.name}")
 
+                # Automatically initialize the audio stream with the current device
+                self.change_device()
+
             else:
                 if self.voice is not None:
                     await self.voice.disconnect()

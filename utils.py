@@ -5,6 +5,9 @@ This module provides functions for transcribing audio to text using Whisper
 and translating text between languages using DeepL's API. It includes a preloaded
 Whisper model to improve performance across multiple transcription requests.
 """
+import os
+import wave
+import numpy as np
 import whisper
 import requests
 
@@ -59,3 +62,59 @@ async def translate(text):
     )
     translation = response.json()["translations"][0]["text"]
     return translation
+
+
+def create_dummy_audio_file(filename="warmup_audio.wav"):
+    """Create a small audio file for model warm-up.
+
+    Args:
+        filename (str): Name of the dummy audio file to create
+
+    Returns:
+        str: Path to the created audio file
+    """
+    # Create a 1-second file of silence (with a tiny bit of noise)
+    # using the format Whisper expects (16kHz, 16-bit, mono)
+    sample_rate = 16000
+    duration = 1  # 1 second
+
+    # Create an array of small random values (quiet noise)
+    audio_data = np.random.normal(
+        0, 0.01, sample_rate * duration).astype(np.int16)
+
+    # Write to WAV file
+    with wave.Wave_write(filename) as wf:
+        wf.setnchannels(1)  # Mono
+        wf.setsampwidth(2)  # 16-bit
+        wf.setframerate(sample_rate)
+        wf.writeframes(audio_data.tobytes())
+
+    return filename
+
+
+async def warm_up_pipeline():
+    """Warm up the transcription pipeline.
+
+    Runs a quick inference through the Whisper model to:
+    - Pre-compile CUDA kernels
+    - Allocate GPU memory
+    - Initialize internal caches
+    - Optimize execution paths
+
+    This significantly reduces the delay for the first real transcription.
+    """
+    print("Warming up transcription pipeline...")
+    try:
+        # Create a dummy audio file
+        dummy_file = create_dummy_audio_file()
+
+        # Run through transcription
+        await transcribe(dummy_file)
+
+        # Clean up
+        if os.path.exists(dummy_file):
+            os.remove(dummy_file)
+
+        print("Pipeline warm-up complete")
+    except (IOError, FileNotFoundError, PermissionError, RuntimeError) as e:
+        print(f"Warm-up error (non-critical): {e}")

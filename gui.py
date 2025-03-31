@@ -1,9 +1,9 @@
 import os
 import sys
-import sound
 import asyncio
 import logging
 import discord
+# pylint: disable=no-name-in-module
 from PyQt5.QtSvg import QSvgWidget
 from PyQt5.QtGui import QFontDatabase, QFontMetrics, QIcon
 from PyQt5.QtCore import Qt, QCoreApplication, QEventLoop, QDir, pyqtSignal
@@ -21,10 +21,13 @@ from PyQt5.QtWidgets import (
     QTextEdit,
     QMessageBox
 )
+# pylint: enable=no-name-in-module
+import sound
 from custom_sink import RealTimeWaveSink
 
 if getattr(sys, "frozen", False):
-    bundle_dir = sys._MEIPASS
+    bundle_dir = getattr(
+        sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 else:
     bundle_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -148,8 +151,8 @@ class Connection:
             else:
                 self.stream.change_device(selection)
 
-        except Exception:
-            logging.exception("Error on change_device")
+        except (discord.errors.ClientException, AttributeError, ValueError, RuntimeError) as e:
+            logging.exception("Error on change_device: %s", e)
 
     async def change_server(self, deselcted, selected):
         try:
@@ -198,8 +201,9 @@ class Connection:
                     self.parent.vc = None
                     print("Disconnected from the voice channel.")
 
-        except Exception:
-            logging.exception("Error on change_channel")
+        except (discord.errors.ClientException, discord.errors.HTTPException,
+                asyncio.TimeoutError, AttributeError, RuntimeError) as e:
+            logging.exception("Error on change_channel: %s", e)
 
         finally:
             self.setEnabled(True)
@@ -229,8 +233,12 @@ class Connection:
                 else:
                     self.voice.resume()
                     self.mute.setText("Mute")
-        except Exception:
-            logging.exception("Error on toggle_mute")
+        except discord.errors.ClientException as e:
+            logging.exception("Discord client error in toggle_mute: %s", e)
+        except AttributeError as e:
+            logging.exception("Attribute error in toggle_mute: %s", e)
+        except RuntimeError as e:
+            logging.exception("Runtime error in toggle_mute: %s", e)
 
     def toggle_listen(self):
         try:

@@ -23,6 +23,7 @@ import discord
 from PyQt5.QtWidgets import QMessageBox, QApplication
 # pylint: enable=no-name-in-module
 import gui
+import utils
 
 # Error logging setup
 error_formatter = logging.Formatter(
@@ -76,6 +77,10 @@ async def main(client):
     try:
         token = open("token.txt", "r", encoding="utf-8").read()
 
+        # Warm up the ML pipeline to reduce first-use latency
+        await utils.warm_up_pipeline()
+
+        # Initialize the GUI
         app = QApplication(sys.argv)
         bot_ui = gui.GUI(app, client)
         asyncio.ensure_future(bot_ui.ready())

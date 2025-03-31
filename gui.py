@@ -523,22 +523,80 @@ class GUI(QMainWindow):
         self.setEnabled(True)
 
     def update_text_display(self, transcribed_text, translated_text):
-        """Append new transcriptions and translations to the text displays with size limits."""
-        # Get current text
+        """Append new transcriptions and translations to the text displays with more natural formatting."""
+        # Check if we need to add attributes for tracking last speaker
+        if not hasattr(self, 'last_transcription_speaker'):
+            self.last_transcription_speaker = ""
+            self.last_translation_speaker = ""
+
+        # Parse out the speaker from the incoming texts
+        try:
+            current_speaker_transcribed = transcribed_text.split(":", 1)[
+                0].strip()
+            current_text_transcribed = transcribed_text.split(":", 1)[
+                1].strip()
+
+            current_speaker_translated = translated_text.split(":", 1)[
+                0].strip()
+            current_text_translated = translated_text.split(":", 1)[1].strip()
+        except IndexError:
+            # Fallback if the text doesn't contain a colon
+            current_speaker_transcribed = ""
+            current_text_transcribed = transcribed_text
+            current_speaker_translated = ""
+            current_text_translated = translated_text
+
+        # Get current text from displays
         current_transcribed = self.transcribed_display.toPlainText()
         current_translated = self.translated_display.toPlainText()
 
-        # Add new text
-        new_transcribed = f"{current_transcribed}\n{transcribed_text}".strip()
-        new_translated = f"{current_translated}\n{translated_text}".strip()
+        # Process transcribed text
+        if current_transcribed and current_speaker_transcribed == self.last_transcription_speaker:
+            # Same speaker, append to the last line with punctuation handling
+            lines = current_transcribed.split("\n")
+            last_line = lines[-1]
+            if last_line.endswith('.') or last_line.endswith('!') or last_line.endswith('?'):
+                # If last line ends with proper punctuation, just add space
+                new_transcribed = f"{current_transcribed} {current_text_transcribed}"
+            else:
+                # Otherwise add a period and space for readability
+                new_transcribed = f"{current_transcribed}. {current_text_transcribed}"
+        else:
+            # New speaker, add a new line
+            if current_transcribed:
+                new_transcribed = f"{current_transcribed}\n{current_speaker_transcribed}: {current_text_transcribed}"
+            else:
+                new_transcribed = f"{current_speaker_transcribed}: {current_text_transcribed}"
 
-        # Limit text size (keep last 30 entries)
+        # Process translated text
+        if current_translated and current_speaker_translated == self.last_translation_speaker:
+            # Same speaker, append to the last line with punctuation handling
+            lines = current_translated.split("\n")
+            last_line = lines[-1]
+            if last_line.endswith('.') or last_line.endswith('!') or last_line.endswith('?'):
+                # If last line ends with proper punctuation, just add space
+                new_translated = f"{current_translated} {current_text_translated}"
+            else:
+                # Otherwise add a period and space for readability
+                new_translated = f"{current_translated}. {current_text_translated}"
+        else:
+            # New speaker, add a new line
+            if current_translated:
+                new_translated = f"{current_translated}\n{current_speaker_translated}: {current_text_translated}"
+            else:
+                new_translated = f"{current_speaker_translated}: {current_text_translated}"
+
+        # Update last speaker tracking
+        self.last_transcription_speaker = current_speaker_transcribed
+        self.last_translation_speaker = current_speaker_translated
+
+        # Limit text size (keep last 30 lines)
         transcribed_lines = new_transcribed.split("\n")
         translated_lines = new_translated.split("\n")
 
-        if len(transcribed_lines) > 30:  # Changed from 20 to 30
+        if len(transcribed_lines) > 30:
             transcribed_lines = transcribed_lines[-30:]
-        if len(translated_lines) > 30:  # Changed from 20 to 30
+        if len(translated_lines) > 30:
             translated_lines = translated_lines[-30:]
 
         # Update display

@@ -437,12 +437,16 @@ class GUI(QMainWindow):
         self.transcribed_display = QTextEdit()
         self.transcribed_display.setReadOnly(True)
         self.transcribed_display.setPlaceholderText("Transcribed Text")
+        # Make it taller - adjust value as needed
+        self.transcribed_display.setMinimumHeight(400)
         self.layout.addWidget(self.transcribed_display, 4,
                               0, 1, 4)  # Spanning all columns
 
         self.translated_display = QTextEdit()
         self.translated_display.setReadOnly(True)
         self.translated_display.setPlaceholderText("Translated Text")
+        # Make it taller - adjust value as needed
+        self.translated_display.setMinimumHeight(400)
         self.layout.addWidget(self.translated_display, 5,
                               0, 1, 4)  # Spanning all columns
 
@@ -528,14 +532,14 @@ class GUI(QMainWindow):
         new_transcribed = f"{current_transcribed}\n{transcribed_text}".strip()
         new_translated = f"{current_translated}\n{translated_text}".strip()
 
-        # Limit text size (keep last 20 entries)
+        # Limit text size (keep last 30 entries)
         transcribed_lines = new_transcribed.split("\n")
         translated_lines = new_translated.split("\n")
 
-        if len(transcribed_lines) > 20:
-            transcribed_lines = transcribed_lines[-20:]
-        if len(translated_lines) > 20:
-            translated_lines = translated_lines[-20:]
+        if len(transcribed_lines) > 30:  # Changed from 20 to 30
+            transcribed_lines = transcribed_lines[-30:]
+        if len(translated_lines) > 30:  # Changed from 20 to 30
+            translated_lines = translated_lines[-30:]
 
         # Update display
         self.transcribed_display.setPlainText("\n".join(transcribed_lines))

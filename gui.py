@@ -20,14 +20,12 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QStyledItemDelegate,
     QListView,
-    QTextEdit,  # Add QTextEdit for text display
-    QMessageBox  # Add QMessageBox for emergency stop confirmation
+    QTextEdit,
+    QMessageBox
 )
-# Import listen and other functions
-# Import listen_and_transcribe
 import utils
 from discord.sinks import WaveSink
-from custom_sink import RealTimeWaveSink  # Import the custom sink
+from custom_sink import RealTimeWaveSink
 
 if getattr(sys, "frozen", False):
     bundle_dir = sys._MEIPASS
@@ -40,11 +38,9 @@ class Dropdown(QComboBox):
 
     def __init__(self):
         super(Dropdown, self).__init__()
-
         self.setItemDelegate(QStyledItemDelegate())
         self.setPlaceholderText("None")
         self.setView(QListView())
-
         self.deselected = None
         self.currentIndexChanged.connect(self.changed_signal)
 
@@ -59,13 +55,10 @@ class Dropdown(QComboBox):
 class SVGButton(QPushButton):
     def __init__(self, text=None):
         super(SVGButton, self).__init__(text)
-
         self.layout = QHBoxLayout()
         self.setLayout(self.layout)
-
         self.svg = QSvgWidget("./assets/loading.svg", self)
         self.svg.setVisible(False)
-
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.addWidget(self.svg)
 
@@ -79,6 +72,7 @@ class Connection:
         self.stream = sound.PCMStream()
         self.parent = parent
         self.voice = None
+        self.sink = None
 
         # dropdowns
         self.devices = Dropdown()
@@ -88,19 +82,11 @@ class Connection:
         for device, idx in parent.devices.items():
             self.devices.addItem(device + "   ", idx)
 
-        # mute
+        # buttons
         self.mute = SVGButton("Mute")
         self.mute.setObjectName("mute")
-
-        # record button
-        self.record = SVGButton("Record")
-        self.record.setObjectName("record")
-
-        # Rename record button to listen
         self.listen = SVGButton("Listen")
         self.listen.setObjectName("listen")
-
-        # Add clear button
         self.clear = QPushButton("Clear")
         self.clear.setObjectName("clear")
 
@@ -109,8 +95,10 @@ class Connection:
         parent.layout.addWidget(self.servers, layer, 1)
         parent.layout.addWidget(self.channels, layer, 2)
         parent.layout.addWidget(self.mute, layer, 3)
-        parent.layout.addWidget(self.listen, layer, 4)  # Listen button
-        parent.layout.addWidget(self.clear, layer, 5)  # Clear button
+        # Fixed: Added to layout
+        parent.layout.addWidget(self.listen, layer+1, 2)
+        # Fixed: Added to layout
+        parent.layout.addWidget(self.clear, layer+1, 3)
 
         # events
         self.devices.changed.connect(self.change_device)
@@ -123,10 +111,8 @@ class Connection:
             lambda: asyncio.ensure_future(self.change_channel())
         )
         self.mute.clicked.connect(self.toggle_mute)
-        # Update event connection for listen button
         self.listen.clicked.connect(self.toggle_listen)
-        self.clear.clicked.connect(
-            self.clear_text_boxes)  # Connect clear button
+        self.clear.clicked.connect(self.clear_text_boxes)
 
     @staticmethod
     def resize_combobox(combobox):
@@ -145,7 +131,6 @@ class Connection:
         self.devices.setEnabled(enabled)
         self.servers.setEnabled(enabled)
         self.channels.setEnabled(enabled)
-
         self.mute.setEnabled(enabled)
         self.mute.setText("Mute" if enabled else "")
 
@@ -164,7 +149,6 @@ class Connection:
 
                 if self.voice.is_connected():
                     self.voice.play(self.stream)
-
             else:
                 self.stream.change_device(selection)
 
@@ -231,10 +215,9 @@ class Connection:
                 self.parent.connected_users = [
                     member for member in new_channel.members if member.id != self.parent.bot.user.id
                 ]
+                print(f"Bot moved to a new channel: {new_channel.name}")
                 print(
-                    f"Bot moved to a new channel: {new_channel.name}")
-                print(
-                    f"Updated connected_users list for new channel: {[user.display_name for user in this.parent.connected_users]}")
+                    f"Updated connected_users list for new channel: {[user.display_name for user in self.parent.connected_users]}")
             else:
                 self.parent.connected_users = []
                 print("Bot is no longer in a voice channel. Connected users cleared.")
@@ -250,7 +233,6 @@ class Connection:
                 else:
                     self.voice.resume()
                     self.mute.setText("Mute")
-
         except Exception:
             logging.exception("Error on toggle_mute")
 
@@ -313,11 +295,8 @@ class Connection:
 
 class TitleBar(QFrame):
     def __init__(self, parent):
-        # title bar
         super(TitleBar, self).__init__()
         self.setObjectName("titlebar")
-
-        # discord
         self.parent = parent
         self.bot = parent.bot
 
@@ -329,15 +308,11 @@ class TitleBar(QFrame):
         # window title
         title = QLabel("Discord Audio Pipe")
 
-        # minimize
+        # buttons
         minimize_button = QPushButton("—")
         minimize_button.setObjectName("minimize")
-        layout.addWidget(minimize_button)
-
-        # close
         close_button = QPushButton("✕")
         close_button.setObjectName("close")
-        layout.addWidget(close_button)
 
         # add widgets
         layout.addWidget(title)
@@ -355,15 +330,12 @@ class TitleBar(QFrame):
         if self.parent.is_listening:
             try:
                 print("Stopping recording before closing...")
-                # Use the existing force_stop_listening method to do proper cleanup
                 self.parent.force_stop_listening()
-                # Give it a moment to clean up
                 await asyncio.sleep(0.5)
             except Exception as e:
                 print(f"Error stopping recording during close: {e}")
 
         # Then proceed with the normal closing routine
-        # workaround for logout bug
         for voice in self.bot.voice_clients:
             try:
                 await voice.disconnect()
@@ -380,7 +352,6 @@ class TitleBar(QFrame):
 
 class GUI(QMainWindow):
     def __init__(self, app, bot):
-        # app
         super(GUI, self).__init__()
         QDir.setCurrent(bundle_dir)
         self.app = app
@@ -415,7 +386,7 @@ class GUI(QMainWindow):
         self.connections = [Connection(2, self)]
         self.connected_servers = set()
 
-        # Remove connection button logic
+        # UI layout
         self.layout.addWidget(self.info, 0, 0, 1, 4)  # Info label at the top
         self.layout.addWidget(device_lb, 1, 0)  # Device label
         self.layout.addWidget(server_lb, 1, 1)  # Server label
@@ -433,11 +404,10 @@ class GUI(QMainWindow):
             self.connections[0].listen, 3, 2)  # Listen button
         self.layout.addWidget(self.connections[0].clear, 3, 3)  # Clear button
 
-        # Add separate text display areas for transcribed and translated text
+        # Text display areas
         self.transcribed_display = QTextEdit()
         self.transcribed_display.setReadOnly(True)
         self.transcribed_display.setPlaceholderText("Transcribed Text")
-        # Make it taller - adjust value as needed
         self.transcribed_display.setMinimumHeight(400)
         self.layout.addWidget(self.transcribed_display, 4,
                               0, 1, 4)  # Spanning all columns
@@ -445,23 +415,17 @@ class GUI(QMainWindow):
         self.translated_display = QTextEdit()
         self.translated_display.setReadOnly(True)
         self.translated_display.setPlaceholderText("Translated Text")
-        # Make it taller - adjust value as needed
         self.translated_display.setMinimumHeight(400)
         self.layout.addWidget(self.translated_display, 5,
                               0, 1, 4)  # Spanning all columns
 
-        # Add this to the GUI.__init__ method in gui.py after the existing buttons
         # Emergency stop button
         self.emergency_stop = QPushButton("EMERGENCY STOP")
         self.emergency_stop.setObjectName("emergency")
         self.emergency_stop.setStyleSheet(
             "background-color: darkred; color: white; font-weight: bold;")
-        # Position it at row 3, column 0
         self.emergency_stop.clicked.connect(self.force_stop_listening)
-        # Position it at row 3, column 0
         self.layout.addWidget(self.emergency_stop, 3, 0)
-
-        # Remove connection button event
 
         # build window
         titlebar = TitleBar(self)
@@ -477,10 +441,11 @@ class GUI(QMainWindow):
         # show window
         self.show()
 
-        self.is_recording = False  # Add recording state
-        self.is_listening = False  # Rename recording state to listening
-        self.active_listeners = {}  # Track active listeners for each user
+        # State tracking
+        self.is_listening = False
         self.connected_users = []  # List to track users in the voice channel
+        self.last_transcription_speaker = ""
+        self.last_translation_speaker = ""
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -516,7 +481,6 @@ class GUI(QMainWindow):
 
     async def ready(self):
         await self.bot.wait_until_ready()
-
         self.info.setText(f"Logged in as: {self.bot.user.name}")
         self.connections[0].set_servers(self.bot.guilds)
         Connection.resize_combobox(self.connections[0].servers)
@@ -524,18 +488,12 @@ class GUI(QMainWindow):
 
     def update_text_display(self, transcribed_text, translated_text):
         """Append new transcriptions and translations to the text displays with more natural formatting."""
-        # Check if we need to add attributes for tracking last speaker
-        if not hasattr(self, 'last_transcription_speaker'):
-            self.last_transcription_speaker = ""
-            self.last_translation_speaker = ""
-
         # Parse out the speaker from the incoming texts
         try:
             current_speaker_transcribed = transcribed_text.split(":", 1)[
                 0].strip()
             current_text_transcribed = transcribed_text.split(":", 1)[
                 1].strip()
-
             current_speaker_translated = translated_text.split(":", 1)[
                 0].strip()
             current_text_translated = translated_text.split(":", 1)[1].strip()
@@ -611,7 +569,6 @@ class GUI(QMainWindow):
 
     async def process_audio_callback(self, sink, channel):
         """Process audio data for each user."""
-        # Get the audio data from the sink
         print("Finished processing audio.")
 
     def force_stop_listening(self):
@@ -632,7 +589,7 @@ class GUI(QMainWindow):
                     connection.listen.setText("Listen")
                     connection.listen.setStyleSheet("")
 
-                # Optional: Kill any pending transcription workers
+                # Kill any pending transcription workers
                 for connection in self.connections:
                     if hasattr(connection, "sink") and connection.sink:
                         connection.sink.worker_running = False
@@ -645,7 +602,6 @@ class GUI(QMainWindow):
 
             except Exception as e:
                 print(f"Error during emergency stop: {e}")
-                # Last resort - show error and suggest app restart
                 QMessageBox.critical(
                     self, "Error",
                     "Could not stop recording properly. Please close and restart the application."

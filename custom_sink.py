@@ -1,52 +1,81 @@
+"""
+Discord real-time audio processing module.
+
+This module provides a customized implementation of Discord's audio sink
+for real-time speech detection, transcription, and translation. It handles
+audio streams from Discord voice channels, processes them to detect speech,
+and uses machine learning models to transcribe and translate the speech.
+"""
 import asyncio
 import os
 import time
-import numpy as np
-from discord.sinks import WaveSink
 import io
 import wave
-import utils
 import queue
-import concurrent.futures
 import threading
+import numpy as np
+from discord.sinks import WaveSink
+import utils
 
 
 class RealTimeWaveSink(WaveSink):
-    def __init__(self, pause_threshold=1.0, event_loop=None, *args, **kwargs):
+    """Real-time audio processing sink for Discord voice data.
+
+    This class extends Discord's WaveSink to provide real-time speech detection,
+    transcription and translation capabilities. It processes incoming audio packets,
+    detects speech activity, and manages the workflow of converting speech to text.
+
+    Features:
+    - Automatic speech detection based on audio energy levels
+    - Buffering for smoother speech start/end handling
+    - Silence detection for determining speech boundaries
+    - Background processing of transcription tasks
+    - Periodic checking for inactive speakers
+    - Integration with GUI for displaying transcribed and translated text
+
+    Args:
+        *args: Additional positional arguments to pass to the parent class.
+        pause_threshold (float, optional): Time in seconds to detect a long pause.
+            Defaults to 1.0.
+        event_loop (asyncio.AbstractEventLoop, optional): Event loop for async operations.
+            Defaults to None.
+        **kwargs: Additional keyword arguments to pass to the parent class.
+    """
+
+    def __init__(self, *args, pause_threshold=1.0, event_loop=None, **kwargs):
         super().__init__(*args, **kwargs)
 
-        # Existing initialization
-        self.pause_threshold = pause_threshold  # Time in seconds to detect a pause
-        self.user_last_packet_time = {}  # Track the last packet time for each user
-        self.event_loop = event_loop  # Store the main thread's event loop
+        # Initialize the parent class
+        self.parent = None
 
-        # Improve silence detection parameters - key changes here
-        self.is_speaking = {}  # Track if user is currently speaking
-        self.silence_frames = {}  # Count consecutive silence frames
-        self.speech_detected = {}  # Track if speech was detected in the current session
-        # Lower this (was 15) to detect pauses sooner
-        self.silence_threshold = 10
-        self.last_active_time = {}  # NEW: Track last time user was actively speaking
-        # NEW: Time in seconds after which to force process
-        self.force_process_timeout = 0.8
+        # Audio processing parameters
+        self.pause_threshold = pause_threshold
+        self.silence_threshold = 10  # Frames of silence to consider speech ended
+        self.force_process_timeout = 0.8  # Seconds to force process after silence
 
-        # Rest of the initialization
+        # User tracking
+        self.user_last_packet_time = {}
+        self.last_active_time = {}
+        self.is_speaking = {}
+        self.silence_frames = {}
+        self.speech_detected = {}
+
+        # Audio buffers
         self.speech_buffers = {}
         self.pre_speech_buffers = {}
         self.energy_history = {}
 
-        # Queue initialization
+        # Event loop reference for async operations
+        self.event_loop = event_loop
+
+        # Queue for managing transcription tasks
         self.transcription_queue = queue.Queue(maxsize=10)
-        self.max_concurrent_transcriptions = 2
-        self.active_transcriptions = 0
         self.worker_running = True
 
+        # Start worker thread for transcriptions
         self.worker_thread = threading.Thread(
             target=self._transcription_worker, daemon=True)
         self.worker_thread.start()
-
-        # Add a timer to periodically check for inactive speakers
-        self.processing_timer = None
 
         # Start the timer to check for inactive speakers
         self.processing_timer = threading.Timer(
@@ -55,7 +84,7 @@ class RealTimeWaveSink(WaveSink):
         self.processing_timer.start()
 
     def is_audio_active(self, audio_data, user):
-        """Check if audio data contains active speech with improved detection."""
+        """Check if audio data contains active speech."""
         # Convert bytes to numpy array (assuming PCM signed 16-bit little-endian)
         audio_array = np.frombuffer(audio_data, dtype=np.int16)
 
@@ -64,8 +93,7 @@ class RealTimeWaveSink(WaveSink):
 
         # Initialize energy history if needed
         if user not in self.energy_history:
-            self.energy_history[user] = [energy] * \
-                5  # Start with current energy
+            self.energy_history[user] = [energy] * 5
 
         # Update energy history
         self.energy_history[user].append(energy)
@@ -75,22 +103,17 @@ class RealTimeWaveSink(WaveSink):
         # Calculate average energy over recent frames
         avg_energy = np.mean(self.energy_history[user])
 
-        # Lower threshold for considering audio as speech
-        return avg_energy > 300  # Lower threshold to capture more of the speech
+        # Return if audio is considered active speech
+        return avg_energy > 300  # Threshold for speech detection
 
     def write(self, data, user):
+        """Process incoming audio data from Discord."""
         try:
             current_time = time.time()
 
             # Initialize user-specific data structures if needed
             if user not in self.user_last_packet_time:
-                self.user_last_packet_time[user] = current_time
-                self.is_speaking[user] = False
-                self.silence_frames[user] = 0
-                self.speech_detected[user] = False
-                self.speech_buffers[user] = io.BytesIO()
-                self.pre_speech_buffers[user] = []
-                self.last_active_time[user] = 0  # Initialize last active time
+                self._initialize_user_data(user, current_time)
 
             # Check if the current packet contains active speech
             is_active = self.is_audio_active(data, user)
@@ -99,83 +122,25 @@ class RealTimeWaveSink(WaveSink):
             if is_active:
                 self.last_active_time[user] = current_time
 
-            # Calculate time difference since last packet and last active speech
+            # Calculate time differences
             time_diff = current_time - self.user_last_packet_time[user]
             active_diff = current_time - self.last_active_time[user]
 
-            # Process speech if silent for too long, even if still receiving packets
-            # This is the key fix for your issue
-            if self.is_speaking[user] and self.speech_detected[user] and active_diff > self.force_process_timeout:
-                print(
-                    f"Significant pause detected for user {user}. Processing speech.")
-                self.is_speaking[user] = False
-                self.process_speech_buffer(user)
-                self.speech_detected[user] = False
-                self.silence_frames[user] = 0
-                self.speech_buffers[user] = io.BytesIO()
+            # Process speech if silent for too long
+            if self._should_process_due_to_silence(user, active_diff):
+                self._process_silent_speech(user)
 
-            # If pause is very long, reset everything (existing code)
-            if time_diff > self.pause_threshold:
-                print(
-                    f"Long pause detected for user {user}. Processing any speech and resetting.")
+            # Handle long pauses
+            if self._is_long_pause(time_diff):
+                self._handle_long_pause(user)
 
-                # Process any accumulated speech before resetting
-                if self.is_speaking[user] and self.speech_detected[user]:
-                    print(
-                        f"Processing speech before resetting for user {user}")
-                    self.process_speech_buffer(user)
-
-                # Reset state
-                self.is_speaking[user] = False
-                self.silence_frames[user] = 0
-                self.speech_detected[user] = False
-                # Reset buffers
-                self.speech_buffers[user] = io.BytesIO()
-                self.pre_speech_buffers[user] = []
-
-            # Always store recent frames for smoother beginning of speech
-            self.pre_speech_buffers[user].append(data)
-            if len(self.pre_speech_buffers[user]) > 10:  # Keep ~200ms of audio
-                self.pre_speech_buffers[user].pop(0)
+            # Store recent frames for smoother beginning of speech
+            self._update_pre_speech_buffer(user, data)
 
             if is_active:
-                # Reset silence counter when speech is detected
-                self.silence_frames[user] = 0
-
-                # Mark that speech was detected in this session
-                self.speech_detected[user] = True
-
-                # If this is the start of speech, add pre-speech buffer first
-                if not self.is_speaking[user]:
-                    print(f"Speech started for user {user}")
-                    self.is_speaking[user] = True
-                    # Add pre-speech frames for smoother beginning
-                    for pre_data in self.pre_speech_buffers[user]:
-                        self.speech_buffers[user].write(pre_data)
-
-                # Add this audio data to the speech buffer
-                self.speech_buffers[user].write(data)
-
+                self._handle_active_speech(user, data)
             else:
-                # If we're speaking, still add a few frames to the speech buffer
-                # for smoother transitions
-                if self.is_speaking[user] and self.silence_frames[user] < 5:
-                    self.speech_buffers[user].write(data)
-
-                # Increment silence counter
-                self.silence_frames[user] += 1
-
-                # Check if silence has persisted long enough to consider speech ended
-                if self.is_speaking[user] and self.silence_frames[user] > self.silence_threshold:
-                    print(f"Speech ended for user {user}. Processing audio.")
-                    self.is_speaking[user] = False
-
-                    # Only process if speech was detected in this session
-                    if self.speech_detected[user]:
-                        self.process_speech_buffer(user)
-                        self.speech_detected[user] = False
-                        # Reset speech buffer for next utterance
-                        self.speech_buffers[user] = io.BytesIO()
+                self._handle_silence(user, data)
 
             # Update the last packet time
             self.user_last_packet_time[user] = current_time
@@ -183,9 +148,100 @@ class RealTimeWaveSink(WaveSink):
             # Write to the main buffer
             super().write(data, user)
 
-        except Exception as e:
-            # Don't let exceptions in write crash the audio thread
+        except (KeyError, TypeError, ValueError, AttributeError, IOError, RuntimeError) as e:
             print(f"Error in write method for user {user}: {e}")
+
+    def _initialize_user_data(self, user, current_time):
+        """Initialize data structures for a new user."""
+        self.user_last_packet_time[user] = current_time
+        self.is_speaking[user] = False
+        self.silence_frames[user] = 0
+        self.speech_detected[user] = False
+        self.speech_buffers[user] = io.BytesIO()
+        self.pre_speech_buffers[user] = []
+        self.last_active_time[user] = 0
+
+    def _should_process_due_to_silence(self, user, active_diff):
+        """Check if we should process speech due to silence duration."""
+        return (self.is_speaking[user] and
+                self.speech_detected[user] and
+                active_diff > self.force_process_timeout)
+
+    def _is_long_pause(self, time_diff):
+        """Check if there's been a long pause in receiving packets."""
+        return time_diff > self.pause_threshold
+
+    def _process_silent_speech(self, user):
+        """Process speech after detecting significant silence."""
+        print(
+            f"Significant pause detected for user {user}. Processing speech.")
+        self.is_speaking[user] = False
+        self.process_speech_buffer(user)
+        self.speech_detected[user] = False
+        self.silence_frames[user] = 0
+        self.speech_buffers[user] = io.BytesIO()
+
+    def _handle_long_pause(self, user):
+        """Handle a long pause in audio packets."""
+        print(
+            f"Long pause detected for user {user}. Processing any speech and resetting.")
+
+        # Process any accumulated speech before resetting
+        if self.is_speaking[user] and self.speech_detected[user]:
+            print(f"Processing speech before resetting for user {user}")
+            self.process_speech_buffer(user)
+
+        # Reset state
+        self.is_speaking[user] = False
+        self.silence_frames[user] = 0
+        self.speech_detected[user] = False
+        self.speech_buffers[user] = io.BytesIO()
+        self.pre_speech_buffers[user] = []
+
+    def _update_pre_speech_buffer(self, user, data):
+        """Update the pre-speech buffer for smoother speech beginning."""
+        self.pre_speech_buffers[user].append(data)
+        if len(self.pre_speech_buffers[user]) > 10:  # Keep ~200ms of audio
+            self.pre_speech_buffers[user].pop(0)
+
+    def _handle_active_speech(self, user, data):
+        """Handle incoming active speech data."""
+        # Reset silence counter when speech is detected
+        self.silence_frames[user] = 0
+
+        # Mark that speech was detected in this session
+        self.speech_detected[user] = True
+
+        # If this is the start of speech, add pre-speech buffer first
+        if not self.is_speaking[user]:
+            print(f"Speech started for user {user}")
+            self.is_speaking[user] = True
+            # Add pre-speech frames for smoother beginning
+            for pre_data in self.pre_speech_buffers[user]:
+                self.speech_buffers[user].write(pre_data)
+
+        # Add this audio data to the speech buffer
+        self.speech_buffers[user].write(data)
+
+    def _handle_silence(self, user, data):
+        """Handle silence after speech."""
+        # Add a few frames to the speech buffer for smoother transitions
+        if self.is_speaking[user] and self.silence_frames[user] < 5:
+            self.speech_buffers[user].write(data)
+
+        # Increment silence counter
+        self.silence_frames[user] += 1
+
+        # Check if silence has persisted long enough to consider speech ended
+        if self.is_speaking[user] and self.silence_frames[user] > self.silence_threshold:
+            print(f"Speech ended for user {user}. Processing audio.")
+            self.is_speaking[user] = False
+
+            # Only process if speech was detected in this session
+            if self.speech_detected[user]:
+                self.process_speech_buffer(user)
+                self.speech_detected[user] = False
+                self.speech_buffers[user] = io.BytesIO()
 
     def _transcription_worker(self):
         """Background worker to process transcription queue."""
@@ -200,18 +256,18 @@ class RealTimeWaveSink(WaveSink):
                     self.event_loop
                 )
 
-                # Wait a little before processing next item to avoid overloading
+                # Wait a little before processing next item
                 time.sleep(0.5)
                 self.transcription_queue.task_done()
 
             except queue.Empty:
                 # No items in queue, just continue waiting
                 pass
-            except Exception as e:
+            except (asyncio.InvalidStateError, RuntimeError, ValueError, TypeError, OSError) as e:
                 print(f"Error in transcription worker: {e}")
 
     def process_speech_buffer(self, user):
-        """Process the speech buffer for a user and trigger transcription."""
+        """Process the speech buffer for a user and queue for transcription."""
         if user not in self.speech_buffers:
             print(f"No speech buffer found for user {user}.")
             return
@@ -221,61 +277,56 @@ class RealTimeWaveSink(WaveSink):
         speech_buffer.seek(0, os.SEEK_END)
         buffer_size = speech_buffer.tell()
 
-        # Minimum size for meaningful transcription
-        if buffer_size < 8000:  # Lowered threshold (~1/6 second)
+        # Skip if buffer is too small
+        if buffer_size < 8000:  # ~1/6 second minimum
             print(
-                f"Speech buffer for user {user} is too small ({buffer_size} bytes), skipping transcription.")
+                f"Speech buffer for user {user} is too small ({buffer_size} bytes), skipping.")
             return
 
-        # Create a temporary WAV file from the speech buffer with timestamp to avoid conflicts
+        # Create a temporary WAV file
         timestamp = int(time.time())
         temp_audio_file = f"{user}_{timestamp}_speech.wav"
-
-        # Reset buffer pointer
-        speech_buffer.seek(0)
+        speech_buffer.seek(0)  # Reset buffer pointer
 
         try:
             # Write the speech data to a WAV file
-            with wave.open(temp_audio_file, 'wb') as wf:
+            speech_buffer.seek(0)  # Reset buffer pointer
+            with open(temp_audio_file, 'wb') as out_f:
+                wf = wave.Wave_write(out_f)
                 wf.setnchannels(2)  # Stereo
                 wf.setsampwidth(2)  # 16-bit
                 wf.setframerate(48000)  # 48kHz (Discord's standard)
                 wf.writeframes(speech_buffer.read())
+                wf.close()
 
             print(
-                f"Processing speech for user {user}, audio file size: {os.path.getsize(temp_audio_file)} bytes")
+                f"Processing speech for user {user}, "
+                f"audio file size: {os.path.getsize(temp_audio_file)} bytes"
+            )
 
-            # Instead of directly triggering transcription, add to queue
-            try:
-                # Only add to queue if not full
-                if not self.transcription_queue.full():
-                    self.transcription_queue.put(
-                        (temp_audio_file, user), block=False)
-                    print(f"Added transcription task to queue for user {user}")
-                else:
-                    print(
-                        f"Transcription queue full, skipping audio for user {user}")
-                    # Clean up the file since we're not processing it
-                    os.remove(temp_audio_file)
-            except Exception as e:
-                print(f"Error queueing transcription task: {e}")
+            # Add to transcription queue
+            if not self.transcription_queue.full():
+                self.transcription_queue.put(
+                    (temp_audio_file, user), block=False)
+                print(f"Added transcription task to queue for user {user}")
+            else:
+                print(
+                    f"Transcription queue full, skipping audio for user {user}")
+                os.remove(temp_audio_file)  # Clean up
 
-        except Exception as e:
+        except (IOError, OSError, wave.Error) as e:
             print(f"Error creating WAV file for user {user}: {e}")
 
     async def transcribe_audio(self, audio_file, user):
-        """Transcribe the audio file and handle the result."""
+        """Transcribe the audio file and update the GUI with results."""
         try:
-            # Check if the file exists before transcribing
+            # Skip if file doesn't exist
             if not os.path.exists(audio_file):
-                print(
-                    f"Audio file {audio_file} does not exist, skipping transcription.")
+                print(f"Audio file {audio_file} does not exist, skipping.")
                 return
 
-            # Get transcription
+            # Get transcription and translation
             transcribed_text = await utils.transcribe(audio_file)
-
-            # Get the translation
             translated_text = await utils.translate(transcribed_text) if transcribed_text else ""
 
             # Debug output
@@ -283,51 +334,67 @@ class RealTimeWaveSink(WaveSink):
             print(f"Translation: {translated_text}")
 
             # Update the GUI
-            try:
-                # We need to get the Discord user object to display the username
-                if hasattr(self, 'parent') and self.parent and hasattr(self.parent, 'vc') and self.parent.vc:
-                    # Get the guild and find the member
-                    guild = self.parent.vc.guild
-                    member = guild.get_member(int(user))
-                    user_name = member.display_name if member else f"User {user}"
+            await self._update_gui(user, transcribed_text, translated_text)
 
-                    # Format the display text
-                    display_transcription = f"{user_name}: {transcribed_text}" if transcribed_text else ""
-                    display_translation = f"{user_name}: {translated_text}" if translated_text else ""
+            # Clean up temporary file
+            self._cleanup_audio_file(audio_file)
 
-                    if display_transcription and display_translation:
-                        # Update the GUI display
-                        self.parent.update_text_display(
-                            display_transcription, display_translation)
-                else:
-                    print("Could not find parent or voice client to get username")
-            except Exception as e:
-                print(f"Error updating GUI for user {user}: {e}")
-
-            # Clean up the temporary file
-            try:
-                if os.path.exists(audio_file):
-                    os.remove(audio_file)
-            except Exception as e:
-                print(f"Error removing audio file {audio_file}: {e}")
-
-        except Exception as e:
+        except (FileNotFoundError, IOError, ValueError, RuntimeError, asyncio.TimeoutError) as e:
             print(
                 f"Error during transcription/translation for user {user}: {e}")
+            self._cleanup_audio_file(audio_file)
+
+    async def _update_gui(self, user, transcribed_text, translated_text):
+        """Update the GUI with transcription and translation results."""
+        try:
+            if (hasattr(self, 'parent') and self.parent and
+                    hasattr(self.parent, 'vc') and self.parent.vc):
+                # Get the user's display name
+                guild = self.parent.vc.guild
+                member = guild.get_member(int(user))
+                user_name = member.display_name if member else f"User {user}"
+
+                # Format display text
+                if transcribed_text:
+                    display_transcription = f"{user_name}: {transcribed_text}"
+                else:
+                    display_transcription = ""
+
+                if translated_text:
+                    display_translation = f"{user_name}: {translated_text}"
+                else:
+                    display_translation = ""
+
+                if display_transcription and display_translation:
+                    # Update the GUI
+                    self.parent.update_text_display(
+                        display_transcription, display_translation)
+            else:
+                print("Could not update GUI: Missing voice client or parent reference")
+        except (AttributeError, TypeError, ValueError) as e:
+            print(f"Error updating GUI for user {user}: {e}")
+
+    def _cleanup_audio_file(self, audio_file):
+        """Clean up temporary audio file."""
+        try:
+            if os.path.exists(audio_file):
+                os.remove(audio_file)
+        except (PermissionError, OSError, IOError) as e:
+            print(f"Error removing audio file {audio_file}: {e}")
 
     def _check_inactive_speakers(self):
         """Periodically check for users who have stopped speaking but haven't been processed."""
         try:
             current_time = time.time()
 
-            # Check each user who is currently marked as speaking
+            # Check each active speaker
             for user, is_speaking in list(self.is_speaking.items()):
                 if is_speaking and user in self.speech_detected and self.speech_detected[user]:
-                    # Calculate time since last packet
+                    # Check time since last packet
                     time_since_last_packet = current_time - \
                         self.user_last_packet_time.get(user, 0)
 
-                    # If no packets for more than force_process_timeout seconds, process the speech
+                    # Process if inactive for too long
                     if time_since_last_packet > self.force_process_timeout:
                         print(
                             f"Timer detected inactive speaker {user}. Processing speech.")
@@ -335,8 +402,8 @@ class RealTimeWaveSink(WaveSink):
                         self.process_speech_buffer(user)
                         self.speech_detected[user] = False
                         self.speech_buffers[user] = io.BytesIO()
-        except Exception as e:
-            print(f"Error in check_inactive_speakers: {e}")
+        except (KeyError, AttributeError, TypeError, ValueError) as e:
+            print(f"Error checking inactive speakers: {e}")
         finally:
             # Reschedule the timer if still running
             if self.worker_running:
@@ -351,8 +418,3 @@ class RealTimeWaveSink(WaveSink):
         if self.processing_timer:
             self.processing_timer.cancel()
         print("Cleaning up sink resources...")
-        # Add any necessary cleanup logic here, such as stopping threads or releasing resources.
-        # For example:
-        if hasattr(self, 'timer_thread') and self.timer_thread.is_alive():
-            self.timer_thread.cancel()
-            print("Timer thread stopped.")

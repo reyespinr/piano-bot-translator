@@ -4,8 +4,6 @@ import sound
 import asyncio
 import logging
 import discord
-import threading
-import time
 from PyQt5.QtSvg import QSvgWidget
 from PyQt5.QtGui import QFontDatabase, QFontMetrics, QIcon
 from PyQt5.QtCore import Qt, QCoreApplication, QEventLoop, QDir, pyqtSignal
@@ -23,8 +21,6 @@ from PyQt5.QtWidgets import (
     QTextEdit,
     QMessageBox
 )
-import utils
-from discord.sinks import WaveSink
 from custom_sink import RealTimeWaveSink
 
 if getattr(sys, "frozen", False):

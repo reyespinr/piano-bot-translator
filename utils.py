@@ -1,3 +1,10 @@
+"""
+Audio transcription and translation utilities.
+
+This module provides functions for transcribing audio to text using Whisper
+and translating text between languages using DeepL's API. It includes a preloaded
+Whisper model to improve performance across multiple transcription requests.
+"""
 import whisper
 import requests
 
@@ -12,6 +19,17 @@ print("Whisper model loaded successfully!")
 
 
 async def transcribe(audio_file_path):
+    """Transcribe speech from an audio file to text.
+
+    Uses the preloaded Whisper model to convert speech in an audio file
+    to text transcription.
+
+    Args:
+        audio_file_path (str): Path to the audio file to transcribe
+
+    Returns:
+        str: The transcribed text from the audio file
+    """
     # Use the preloaded model for transcription
     result = MODEL.transcribe(audio_file_path, fp16=True)
     text = result["text"]
@@ -19,6 +37,17 @@ async def transcribe(audio_file_path):
 
 
 async def translate(text):
+    """Translate text to English using DeepL's API.
+
+    Sends the provided text to DeepL's translation API and returns
+    the English translation.
+
+    Args:
+        text (str): The text to be translated
+
+    Returns:
+        str: The translated text in English
+    """
     response = requests.post(
         "https://api-free.deepl.com/v2/translate",
         data={

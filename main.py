@@ -1,10 +1,28 @@
-import discord
+"""
+Discord Voice Channel Translation Bot.
+
+This module serves as the main entry point for the Discord voice translator bot.
+It provides functionality to:
+- Connect to Discord voice channels
+- Listen to audio from users in the channel
+- Transcribe and translate the speech in real-time
+- Display transcriptions and translations in a GUI
+
+The application uses PyQt5 for the GUI interface, Discord.py for the Discord API
+connection, and integrates with whisper and translation APIs for speech processing.
+
+The bot automatically tracks users joining and leaving voice channels and manages
+the recording and processing of audio data from multiple speakers.
+"""
 import asyncio
 import sys
 import logging
 import os
+import discord
+# pylint: disable=no-name-in-module
+from PyQt5.QtWidgets import QMessageBox, QApplication
+# pylint: enable=no-name-in-module
 import gui
-from PyQt5.QtWidgets import QApplication, QMessageBox
 
 # Error logging setup
 error_formatter = logging.Formatter(
@@ -35,49 +53,67 @@ discord.opus.load_opus(opus_path)
 # Main function
 
 
-async def main(bot):
+async def main(client):
+    """Initialize and run the Discord bot with GUI interface.
+
+    This is the primary entry point for the application. It handles:
+    - Reading the Discord authentication token
+    - Setting up the PyQt5 GUI
+    - Registering Discord event handlers
+    - Error handling for common startup issues
+
+    The function sets up event handlers to track users entering and leaving
+    voice channels, and to update the GUI with the current channel state.
+
+    Args:
+        client (discord.Client): The Discord client instance to use for the bot
+
+    Raises:
+        FileNotFoundError: If the token.txt file cannot be found
+        discord.errors.LoginFailure: If the provided token is invalid
+        Exception: For any other errors that occur during execution
+    """
     try:
-        token = open("token.txt", "r").read()
+        token = open("token.txt", "r", encoding="utf-8").read()
 
         app = QApplication(sys.argv)
-        bot_ui = gui.GUI(app, bot)
+        bot_ui = gui.GUI(app, client)
         asyncio.ensure_future(bot_ui.ready())
         asyncio.ensure_future(bot_ui.run_Qt())
 
-        @bot.event
+        @client.event
         async def on_ready():
-            print(f'Logged in as {bot.user}')
+            print(f'Logged in as {client.user}')
             print("Bot is ready and waiting for voice state updates...")
-
             # Check if the bot is already connected to a voice channel
-            if bot.voice_clients:
-                vc = bot.voice_clients[0]
+            if client.voice_clients:
+                vc = client.voice_clients[0]
                 bot_ui.vc = vc  # Assign the voice client to the GUI instance
                 print(f"Bot is connected to voice channel: {vc.channel.name}")
-
                 # Populate and display the connected users list
                 bot_ui.connected_users = [
-                    member for member in vc.channel.members if member.id != bot.user.id
+                    member for member in vc.channel.members if member.id != client.user.id
                 ]
                 print(
                     f"Connected users: {[user.display_name for user in bot_ui.connected_users]}"
                 )
 
-        @bot.event
+        @client.event
         async def on_voice_state_update(member, before, after):
             print("Voice state update detected...")  # Debugging statement
 
             # Handle the bot moving to a new channel
-            if member.id == bot.user.id and before.channel != after.channel:
+            if member.id == client.user.id and before.channel != after.channel:
                 print(
                     f"Bot moved to a new channel: {after.channel.name if after.channel else 'None'}"
                 )
                 if after.channel:
                     bot_ui.connected_users = [
-                        member for member in after.channel.members if member.id != bot.user.id
+                        member for member in after.channel.members if member.id != client.user.id
                     ]
                     print(
-                        f"Updated connected_users list for new channel: {[user.display_name for user in bot_ui.connected_users]}"
+                        f"Bot moved to a new channel: "
+                        f"{after.channel.name if after.channel else 'None'}"
                     )
                 else:
                     bot_ui.connected_users = []
@@ -86,7 +122,7 @@ async def main(bot):
                     )
 
             # Ignore the bot itself for other updates
-            if member.id == bot.user.id:
+            if member.id == client.user.id:
                 print("Ignoring voice state update for the bot itself.")
                 return
 
@@ -102,21 +138,24 @@ async def main(bot):
                             f"User {member.display_name} added to connected_users list."
                         )
                         print(
-                            f"Updated connected_users list: {[user.display_name for user in bot_ui.connected_users]}"
+                            f"Updated connected_users list: "
+                            f"{[user.display_name for user in bot_ui.connected_users]}"
                         )
 
                 # Handle users leaving the channel
-                if before.channel == current_channel and after.channel != current_channel:
+                if (before.channel == current_channel and
+                        after.channel != current_channel):
                     if member in bot_ui.connected_users:
                         bot_ui.connected_users.remove(member)
                         print(
                             f"User {member.display_name} removed from connected_users list."
                         )
                         print(
-                            f"Updated connected_users list: {[user.display_name for user in bot_ui.connected_users]}"
+                            f"Updated connected_users list: "
+                            f"{[user.display_name for user in bot_ui.connected_users]}"
                         )
 
-        await bot.start(token)
+        await client.start(token)
 
     except FileNotFoundError:
         msg = QMessageBox()
@@ -132,8 +171,23 @@ async def main(bot):
         msg.setIcon(QMessageBox.Information)
         msg.exec()
 
-    except Exception:
-        logging.exception("Error on main")
+    except (discord.errors.HTTPException, discord.errors.GatewayNotFound,
+            discord.errors.ConnectionClosed) as e:
+        logging.error("Discord connection error: %s", str(e))
+        msg = QMessageBox()
+        msg.setWindowTitle("Connection Error")
+        msg.setText(f"Failed to connect to Discord: {str(e)}")
+        msg.setIcon(QMessageBox.Critical)
+        msg.exec()
+
+    except asyncio.exceptions.CancelledError:
+        logging.info("Asyncio task cancelled")
+
+    # pylint: disable=broad-except
+    # This is a last-resort error handler to log any unexpected exceptions
+    # and prevent the application from crashing silently
+    except Exception as e:
+        logging.exception("Unexpected error in main: %s", str(e))
 
 # Run program
 intents = discord.Intents.default()

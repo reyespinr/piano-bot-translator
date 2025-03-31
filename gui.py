@@ -234,7 +234,7 @@ class Connection:
                 print(
                     f"Bot moved to a new channel: {new_channel.name}")
                 print(
-                    f"Updated connected_users list for new channel: {[user.display_name for user in self.parent.connected_users]}")
+                    f"Updated connected_users list for new channel: {[user.display_name for user in this.parent.connected_users]}")
             else:
                 self.parent.connected_users = []
                 print("Bot is no longer in a voice channel. Connected users cleared.")
@@ -351,6 +351,18 @@ class TitleBar(QFrame):
             lambda: asyncio.ensure_future(self.close()))
 
     async def close(self):
+        # First, check if listening is active and stop it
+        if self.parent.is_listening:
+            try:
+                print("Stopping recording before closing...")
+                # Use the existing force_stop_listening method to do proper cleanup
+                self.parent.force_stop_listening()
+                # Give it a moment to clean up
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                print(f"Error stopping recording during close: {e}")
+
+        # Then proceed with the normal closing routine
         # workaround for logout bug
         for voice in self.bot.voice_clients:
             try:
@@ -579,12 +591,52 @@ class GUI(QMainWindow):
 
     def cleanup_resources(self):
         """Clean up resources when application is closing."""
+        print("Cleaning up resources...")
+
         if self.is_listening and self.vc:
             try:
+                # Stop recording
+                self.vc.stop_recording()
+                print("Recording stopped during cleanup")
+
+                # Reset state
+                self.is_listening = False
+
+                # Clean up sink resources
                 for connection in self.connections:
                     if hasattr(connection, "sink") and connection.sink:
-                        connection.sink.cleanup()
+                        if hasattr(connection.sink, "cleanup"):
+                            connection.sink.cleanup()
+                        if hasattr(connection.sink, "worker_running"):
+                            connection.sink.worker_running = False
 
-                self.vc.stop_recording()
+                        # Give worker threads a chance to terminate
+                        if hasattr(connection.sink, "worker_thread"):
+                            connection.sink.worker_thread.join(timeout=1.0)
             except Exception as e:
                 print(f"Error during cleanup: {e}")
+
+        # Make sure all voice clients are disconnected
+        for voice in self.bot.voice_clients:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    voice.disconnect(), self.bot.loop)
+            except Exception as e:
+                print(f"Error disconnecting voice client: {e}")
+
+    def closeEvent(self, event):
+        """Handle window close event properly."""
+        print("Window close event detected")
+
+        # First stop any active recording
+        if self.is_listening and self.vc:
+            try:
+                self.force_stop_listening()
+            except Exception as e:
+                print(f"Error stopping recording during close: {e}")
+
+        # Clean up resources
+        self.cleanup_resources()
+
+        # Accept the close event and proceed with closing
+        event.accept()

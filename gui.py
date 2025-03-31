@@ -20,7 +20,8 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QStyledItemDelegate,
     QListView,
-    QTextEdit  # Add QTextEdit for text display
+    QTextEdit,  # Add QTextEdit for text display
+    QMessageBox  # Add QMessageBox for emergency stop confirmation
 )
 # Import listen and other functions
 # Import listen_and_transcribe
@@ -287,6 +288,8 @@ class Connection:
                         # Add a reference to the parent GUI
                         sink.parent = self.parent
 
+                        # Store the sink instance for emergency access
+                        self.sink = sink
                         self.parent.vc.start_recording(
                             sink,
                             self.parent.process_audio_callback,
@@ -431,6 +434,17 @@ class GUI(QMainWindow):
         self.layout.addWidget(self.translated_display, 5,
                               0, 1, 4)  # Spanning all columns
 
+        # Add this to the GUI.__init__ method in gui.py after the existing buttons
+        # Emergency stop button
+        self.emergency_stop = QPushButton("EMERGENCY STOP")
+        self.emergency_stop.setObjectName("emergency")
+        self.emergency_stop.setStyleSheet(
+            "background-color: darkred; color: white; font-weight: bold;")
+        # Position it at row 3, column 0
+        self.emergency_stop.clicked.connect(self.force_stop_listening)
+        # Position it at row 3, column 0
+        self.layout.addWidget(self.emergency_stop, 3, 0)
+
         # Remove connection button event
 
         # build window
@@ -496,16 +510,33 @@ class GUI(QMainWindow):
         self.setEnabled(True)
 
     def update_text_display(self, transcribed_text, translated_text):
-        """Append new transcriptions and translations to the text displays."""
+        """Append new transcriptions and translations to the text displays with size limits."""
+        # Get current text
         current_transcribed = self.transcribed_display.toPlainText()
         current_translated = self.translated_display.toPlainText()
 
-        self.transcribed_display.setPlainText(
-            f"{current_transcribed}\n{transcribed_text}".strip()
-        )
-        self.translated_display.setPlainText(
-            f"{current_translated}\n{translated_text}".strip()
-        )
+        # Add new text
+        new_transcribed = f"{current_transcribed}\n{transcribed_text}".strip()
+        new_translated = f"{current_translated}\n{translated_text}".strip()
+
+        # Limit text size (keep last 20 entries)
+        transcribed_lines = new_transcribed.split("\n")
+        translated_lines = new_translated.split("\n")
+
+        if len(transcribed_lines) > 20:
+            transcribed_lines = transcribed_lines[-20:]
+        if len(translated_lines) > 20:
+            translated_lines = translated_lines[-20:]
+
+        # Update display
+        self.transcribed_display.setPlainText("\n".join(transcribed_lines))
+        self.translated_display.setPlainText("\n".join(translated_lines))
+
+        # Scroll to the bottom
+        self.transcribed_display.verticalScrollBar().setValue(
+            self.transcribed_display.verticalScrollBar().maximum())
+        self.translated_display.verticalScrollBar().setValue(
+            self.translated_display.verticalScrollBar().maximum())
 
     async def process_audio_callback(self, sink, channel):
         """Process audio data for each user."""
@@ -539,7 +570,8 @@ class GUI(QMainWindow):
         #     # Clean up the temporary file
         #     # os.remove(temp_audio_file)
 
-        print("Finished processing audio.")  # Debugging statement
+        # Debugging statement
+        print("Finished processing audio.")
 
     async def handle_voice_client_error(self):
         """Handles voice client errors and attempts to reconnect."""
@@ -586,3 +618,41 @@ class GUI(QMainWindow):
             self.original_excepthook(exc_type, exc_value, exc_traceback)
 
         sys.excepthook = custom_exception_handler
+
+    # Then add this method to the GUI class
+    def force_stop_listening(self):
+        """Force stop listening without relying on normal UI flow."""
+        print("Emergency stop triggered!")
+
+        if self.is_listening and self.vc:
+            try:
+                # Stop recording directly
+                self.vc.stop_recording()
+                print("Forced recording to stop.")
+
+                # Reset state
+                self.is_listening = False
+
+                # Update any connection button states
+                for connection in self.connections:
+                    connection.listen.setText("Listen")
+                    connection.listen.setStyleSheet("")
+
+                # Optional: Kill any pending transcription workers
+                for connection in self.connections:
+                    if hasattr(connection, "sink") and connection.sink:
+                        connection.sink.worker_running = False
+
+                # Show confirmation to user
+                QMessageBox.information(
+                    self, "Emergency Stop",
+                    "Recording has been force-stopped. You may need to restart the application if issues persist."
+                )
+
+            except Exception as e:
+                print(f"Error during emergency stop: {e}")
+                # Last resort - show error and suggest app restart
+                QMessageBox.critical(
+                    self, "Error",
+                    "Could not stop recording properly. Please close and restart the application."
+                )

@@ -6,6 +6,9 @@ from discord.sinks import WaveSink
 import io
 import wave
 import utils
+import queue
+import concurrent.futures
+import threading
 
 
 class RealTimeWaveSink(WaveSink):
@@ -20,6 +23,18 @@ class RealTimeWaveSink(WaveSink):
         self.speech_buffers = {}  # Separate buffer to store only speech content
         self.pre_speech_buffers = {}  # Buffer to store audio before speech is detected
         self.energy_history = {}  # Track recent energy levels for better detection
+
+        # Add a queue for transcription tasks
+        self.transcription_queue = queue.Queue(
+            maxsize=10)  # Limit to 10 pending tasks
+        self.max_concurrent_transcriptions = 2  # Maximum concurrent transcriptions
+        self.active_transcriptions = 0
+        self.worker_running = True
+
+        # Start worker thread for transcriptions
+        self.worker_thread = threading.Thread(
+            target=self._transcription_worker, daemon=True)
+        self.worker_thread.start()
 
     def is_audio_active(self, audio_data, user):
         """Check if audio data contains active speech with improved detection."""
@@ -137,6 +152,29 @@ class RealTimeWaveSink(WaveSink):
             # Don't let exceptions in write crash the audio thread
             print(f"Error in write method for user {user}: {e}")
 
+    def _transcription_worker(self):
+        """Background worker to process transcription queue."""
+        while self.worker_running:
+            try:
+                # Get item from queue with timeout
+                audio_file, user = self.transcription_queue.get(timeout=1)
+
+                # Process the transcription
+                asyncio.run_coroutine_threadsafe(
+                    self.transcribe_audio(audio_file, user),
+                    self.event_loop
+                )
+
+                # Wait a little before processing next item to avoid overloading
+                time.sleep(0.5)
+                self.transcription_queue.task_done()
+
+            except queue.Empty:
+                # No items in queue, just continue waiting
+                pass
+            except Exception as e:
+                print(f"Error in transcription worker: {e}")
+
     def process_speech_buffer(self, user):
         """Process the speech buffer for a user and trigger transcription."""
         if user not in self.speech_buffers:
@@ -172,10 +210,21 @@ class RealTimeWaveSink(WaveSink):
             print(
                 f"Processing speech for user {user}, audio file size: {os.path.getsize(temp_audio_file)} bytes")
 
-            # Trigger transcription in the main thread's event loop
-            asyncio.run_coroutine_threadsafe(
-                self.transcribe_audio(temp_audio_file, user), self.event_loop
-            )
+            # Instead of directly triggering transcription, add to queue
+            try:
+                # Only add to queue if not full
+                if not self.transcription_queue.full():
+                    self.transcription_queue.put(
+                        (temp_audio_file, user), block=False)
+                    print(f"Added transcription task to queue for user {user}")
+                else:
+                    print(
+                        f"Transcription queue full, skipping audio for user {user}")
+                    # Clean up the file since we're not processing it
+                    os.remove(temp_audio_file)
+            except Exception as e:
+                print(f"Error queueing transcription task: {e}")
+
         except Exception as e:
             print(f"Error creating WAV file for user {user}: {e}")
 

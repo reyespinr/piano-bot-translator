@@ -576,3 +576,15 @@ class GUI(QMainWindow):
                     self, "Error",
                     "Could not stop recording properly. Please close and restart the application."
                 )
+
+    def cleanup_resources(self):
+        """Clean up resources when application is closing."""
+        if self.is_listening and self.vc:
+            try:
+                for connection in self.connections:
+                    if hasattr(connection, "sink") and connection.sink:
+                        connection.sink.cleanup()
+
+                self.vc.stop_recording()
+            except Exception as e:
+                print(f"Error during cleanup: {e}")

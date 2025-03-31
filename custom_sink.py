@@ -14,27 +14,45 @@ import threading
 class RealTimeWaveSink(WaveSink):
     def __init__(self, pause_threshold=1.0, event_loop=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+        # Existing initialization
         self.pause_threshold = pause_threshold  # Time in seconds to detect a pause
         self.user_last_packet_time = {}  # Track the last packet time for each user
         self.event_loop = event_loop  # Store the main thread's event loop
+
+        # Improve silence detection parameters - key changes here
         self.is_speaking = {}  # Track if user is currently speaking
         self.silence_frames = {}  # Count consecutive silence frames
         self.speech_detected = {}  # Track if speech was detected in the current session
-        self.speech_buffers = {}  # Separate buffer to store only speech content
-        self.pre_speech_buffers = {}  # Buffer to store audio before speech is detected
-        self.energy_history = {}  # Track recent energy levels for better detection
+        # Lower this (was 15) to detect pauses sooner
+        self.silence_threshold = 10
+        self.last_active_time = {}  # NEW: Track last time user was actively speaking
+        # NEW: Time in seconds after which to force process
+        self.force_process_timeout = 0.8
 
-        # Add a queue for transcription tasks
-        self.transcription_queue = queue.Queue(
-            maxsize=10)  # Limit to 10 pending tasks
-        self.max_concurrent_transcriptions = 2  # Maximum concurrent transcriptions
+        # Rest of the initialization
+        self.speech_buffers = {}
+        self.pre_speech_buffers = {}
+        self.energy_history = {}
+
+        # Queue initialization
+        self.transcription_queue = queue.Queue(maxsize=10)
+        self.max_concurrent_transcriptions = 2
         self.active_transcriptions = 0
         self.worker_running = True
 
-        # Start worker thread for transcriptions
         self.worker_thread = threading.Thread(
             target=self._transcription_worker, daemon=True)
         self.worker_thread.start()
+
+        # Add a timer to periodically check for inactive speakers
+        self.processing_timer = None
+
+        # Start the timer to check for inactive speakers
+        self.processing_timer = threading.Timer(
+            1.0, self._check_inactive_speakers)
+        self.processing_timer.daemon = True
+        self.processing_timer.start()
 
     def is_audio_active(self, audio_data, user):
         """Check if audio data contains active speech with improved detection."""
@@ -72,11 +90,31 @@ class RealTimeWaveSink(WaveSink):
                 self.speech_detected[user] = False
                 self.speech_buffers[user] = io.BytesIO()
                 self.pre_speech_buffers[user] = []
+                self.last_active_time[user] = 0  # Initialize last active time
 
-            # Calculate time difference since the last packet
+            # Check if the current packet contains active speech
+            is_active = self.is_audio_active(data, user)
+
+            # Update last active time if speech is detected
+            if is_active:
+                self.last_active_time[user] = current_time
+
+            # Calculate time difference since last packet and last active speech
             time_diff = current_time - self.user_last_packet_time[user]
+            active_diff = current_time - self.last_active_time[user]
 
-            # If pause is very long, process any speech and reset everything
+            # Process speech if silent for too long, even if still receiving packets
+            # This is the key fix for your issue
+            if self.is_speaking[user] and self.speech_detected[user] and active_diff > self.force_process_timeout:
+                print(
+                    f"Significant pause detected for user {user}. Processing speech.")
+                self.is_speaking[user] = False
+                self.process_speech_buffer(user)
+                self.speech_detected[user] = False
+                self.silence_frames[user] = 0
+                self.speech_buffers[user] = io.BytesIO()
+
+            # If pause is very long, reset everything (existing code)
             if time_diff > self.pause_threshold:
                 print(
                     f"Long pause detected for user {user}. Processing any speech and resetting.")
@@ -99,9 +137,6 @@ class RealTimeWaveSink(WaveSink):
             self.pre_speech_buffers[user].append(data)
             if len(self.pre_speech_buffers[user]) > 10:  # Keep ~200ms of audio
                 self.pre_speech_buffers[user].pop(0)
-
-            # Check if the current packet contains active speech
-            is_active = self.is_audio_active(data, user)
 
             if is_active:
                 # Reset silence counter when speech is detected
@@ -131,7 +166,7 @@ class RealTimeWaveSink(WaveSink):
                 self.silence_frames[user] += 1
 
                 # Check if silence has persisted long enough to consider speech ended
-                if self.is_speaking[user] and self.silence_frames[user] > 15:
+                if self.is_speaking[user] and self.silence_frames[user] > self.silence_threshold:
                     print(f"Speech ended for user {user}. Processing audio.")
                     self.is_speaking[user] = False
 
@@ -279,3 +314,45 @@ class RealTimeWaveSink(WaveSink):
         except Exception as e:
             print(
                 f"Error during transcription/translation for user {user}: {e}")
+
+    def _check_inactive_speakers(self):
+        """Periodically check for users who have stopped speaking but haven't been processed."""
+        try:
+            current_time = time.time()
+
+            # Check each user who is currently marked as speaking
+            for user, is_speaking in list(self.is_speaking.items()):
+                if is_speaking and user in self.speech_detected and self.speech_detected[user]:
+                    # Calculate time since last packet
+                    time_since_last_packet = current_time - \
+                        self.user_last_packet_time.get(user, 0)
+
+                    # If no packets for more than force_process_timeout seconds, process the speech
+                    if time_since_last_packet > self.force_process_timeout:
+                        print(
+                            f"Timer detected inactive speaker {user}. Processing speech.")
+                        self.is_speaking[user] = False
+                        self.process_speech_buffer(user)
+                        self.speech_detected[user] = False
+                        self.speech_buffers[user] = io.BytesIO()
+        except Exception as e:
+            print(f"Error in check_inactive_speakers: {e}")
+        finally:
+            # Reschedule the timer if still running
+            if self.worker_running:
+                self.processing_timer = threading.Timer(
+                    0.5, self._check_inactive_speakers)
+                self.processing_timer.daemon = True
+                self.processing_timer.start()
+
+    def cleanup(self):
+        """Clean up resources when the sink is no longer needed."""
+        self.worker_running = False
+        if self.processing_timer:
+            self.processing_timer.cancel()
+        print("Cleaning up sink resources...")
+        # Add any necessary cleanup logic here, such as stopping threads or releasing resources.
+        # For example:
+        if hasattr(self, 'timer_thread') and self.timer_thread.is_alive():
+            self.timer_thread.cancel()
+            print("Timer thread stopped.")

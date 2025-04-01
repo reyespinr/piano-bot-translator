@@ -84,6 +84,14 @@ class RealTimeWaveSink(WaveSink):
         self.processing_timer.daemon = True
         self.processing_timer.start()
 
+        # Add session tracking variables
+        self.session_start_time = time.time()
+        self.session_state = "new"   # "new", "active", or "established"
+        self.last_speaker_change = time.time()
+        self.current_speakers = set()
+        self.silence_duration = 0
+        self.last_activity_time = time.time()
+
     def is_audio_active(self, audio_data, user):
         """Check if audio data contains active speech."""
         # Convert bytes to numpy array (assuming PCM signed 16-bit little-endian)
@@ -111,6 +119,9 @@ class RealTimeWaveSink(WaveSink):
         """Process incoming audio data from Discord."""
         try:
             current_time = time.time()
+
+            # Update last activity time when any audio is processed
+            self.last_activity_time = current_time
 
             # Initialize user-specific data structures if needed
             if user not in self.user_last_packet_time:
@@ -273,17 +284,55 @@ class RealTimeWaveSink(WaveSink):
             print(f"No speech buffer found for user {user}.")
             return
 
+        # Update session state
+        current_time = time.time()
+
+        # Check for new conversation session
+        if user not in self.current_speakers:
+            print(f"New speaker detected: {user}")
+            self.session_state = "new"
+            self.session_start_time = current_time
+            self.current_speakers.add(user)
+            self.last_speaker_change = current_time
+
+        # Check for extended silence (10+ seconds of no activity)
+        if current_time - self.last_activity_time > 10:
+            print("Long silence detected, starting new conversation session")
+            self.session_state = "new"
+            self.session_start_time = current_time
+
+        # Session state transitions
+        time_in_session = current_time - self.session_start_time
+        if self.session_state == "new" and time_in_session > 30:
+            self.session_state = "active"
+            print("Session transitioned to active state")
+        elif self.session_state == "active" and time_in_session > 120:
+            self.session_state = "established"
+            print("Session transitioned to established state")
+
+        # Update tracking variables
+        self.last_activity_time = current_time
+
         # Get the speech buffer
         speech_buffer = self.speech_buffers[user]
         speech_buffer.seek(0, os.SEEK_END)
         buffer_size = speech_buffer.tell()
 
         # Calculate approximate duration in seconds (48000 Hz, 16-bit stereo)
-        # 48000 samples/sec * 2 bytes/sample * 2 channels = 192000 bytes/sec
         duration_seconds = buffer_size / 192000
 
-        # Adjust minimum duration based on queue size
-        min_duration = 1 if self.transcription_queue.qsize() < 3 else 2
+        # Set minimum duration based on session state and queue size
+        if self.session_state == "new":
+            # More permissive in new conversations
+            min_duration = 0.75 if self.transcription_queue.qsize() < 3 else 1.5
+            print(f"Using new session threshold: {min_duration:.2f}s")
+        elif self.session_state == "active":
+            # Normal threshold for active sessions
+            min_duration = 1 if self.transcription_queue.qsize() < 3 else 2
+        else:  # established
+            # More strict for established conversations
+            min_duration = 1.25 if self.transcription_queue.qsize() < 3 else 2.25
+
         if duration_seconds < min_duration:
             print(
                 f"Speech too short ({duration_seconds:.2f}s < {min_duration:.2f}s), skipping.")

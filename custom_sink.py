@@ -5,6 +5,12 @@ This module provides a customized implementation of Discord's audio sink
 for real-time speech detection, transcription, and translation. It handles
 audio streams from Discord voice channels, processes them to detect speech,
 and uses machine learning models to transcribe and translate the speech.
+
+Features:
+- Context-aware speech processing with session-based priority
+- User-specific processing toggles for selective filtering
+- Adaptive speech detection thresholds based on conversation state
+- Background worker threads for audio transcription
 """
 import asyncio
 import os
@@ -32,6 +38,9 @@ class RealTimeWaveSink(WaveSink):
     - Background processing of transcription tasks
     - Periodic checking for inactive speakers
     - Integration with GUI for displaying transcribed and translated text
+    - Session-based priority filtering for improved conversation context
+    - Selective user processing through toggle controls
+    - Adaptive thresholds based on conversation phase
 
     Args:
         *args: Additional positional arguments to pass to the parent class.
@@ -121,9 +130,11 @@ class RealTimeWaveSink(WaveSink):
             current_time = time.time()
 
             # Check if user is enabled for processing
-            if (hasattr(self, 'parent') and self.parent and
+            if (hasattr(self, 'parent') and
+                    self.parent and
                     hasattr(self.parent, 'user_processing_enabled')):
-                if int(user) in self.parent.user_processing_enabled and not self.parent.user_processing_enabled[int(user)]:
+                if (int(user) in self.parent.user_processing_enabled and
+                        not self.parent.user_processing_enabled[int(user)]):
                     # User is disabled, just write to main buffer and skip processing
                     super().write(data, user)
                     return
@@ -287,7 +298,18 @@ class RealTimeWaveSink(WaveSink):
                 print(f"Error in transcription worker: {e}")
 
     def process_speech_buffer(self, user):
-        """Process the speech buffer for a user and queue for transcription."""
+        """Process the speech buffer for a user and queue for transcription.
+
+        This method handles the conversion of recorded audio to a file for processing.
+        It implements several optimization techniques:
+        - Session-based context awareness (new/active/established states)
+        - Dynamic minimum duration thresholds based on session state
+        - User-specific cooldown periods to prevent rapid transcriptions
+        - Queue size-aware filtering to manage high-traffic periods
+
+        Args:
+            user (str): User ID of the speaker
+        """
         if user not in self.speech_buffers:
             print(f"No speech buffer found for user {user}.")
             return

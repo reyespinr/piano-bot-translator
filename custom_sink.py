@@ -48,10 +48,12 @@ class RealTimeWaveSink(WaveSink):
             Defaults to 1.0.
         event_loop (asyncio.AbstractEventLoop, optional): Event loop for async operations.
             Defaults to None.
+        num_workers (int, optional): Number of transcription worker threads.
+            Defaults to 3.
         **kwargs: Additional keyword arguments to pass to the parent class.
     """
 
-    def __init__(self, *args, pause_threshold=1.0, event_loop=None, **kwargs):
+    def __init__(self, *args, pause_threshold=1.0, event_loop=None, num_workers=3, **kwargs):
         super().__init__(*args, **kwargs)
 
         # Initialize the parent class
@@ -61,6 +63,9 @@ class RealTimeWaveSink(WaveSink):
         self.pause_threshold = pause_threshold
         self.silence_threshold = 10  # Frames of silence to consider speech ended
         self.force_process_timeout = 0.8  # Seconds to force process after silence
+
+        # Worker thread configuration
+        self.num_workers = num_workers  # Number of transcription worker threads
 
         # User tracking
         self.user_last_packet_time = {}
@@ -82,10 +87,17 @@ class RealTimeWaveSink(WaveSink):
         self.transcription_queue = queue.Queue(maxsize=10)
         self.worker_running = True
 
-        # Start worker thread for transcriptions
-        self.worker_thread = threading.Thread(
-            target=self._transcription_worker, daemon=True)
-        self.worker_thread.start()
+        # Start worker thread pool for transcriptions
+        self.worker_threads = []
+        for i in range(self.num_workers):
+            thread = threading.Thread(
+                target=self._transcription_worker,
+                daemon=True,
+                name=f"\nTranscriptionWorker-{i}"
+            )
+            thread.start()
+            self.worker_threads.append(thread)
+            print(f"Started transcription worker {i+1}/{self.num_workers}")
 
         # Start the timer to check for inactive speakers
         self.processing_timer = threading.Timer(
@@ -276,10 +288,14 @@ class RealTimeWaveSink(WaveSink):
 
     def _transcription_worker(self):
         """Background worker to process transcription queue."""
+        thread_name = threading.current_thread().name
+        print(f"{thread_name} started")
+
         while self.worker_running:
             try:
                 # Get item from queue with timeout
                 audio_file, user = self.transcription_queue.get(timeout=1)
+                print(f"{thread_name} processing audio for user {user}")
 
                 # Process the transcription
                 asyncio.run_coroutine_threadsafe(
@@ -287,15 +303,17 @@ class RealTimeWaveSink(WaveSink):
                     self.event_loop
                 )
 
-                # Wait a little before processing next item
-                time.sleep(0.5)
+                # Wait a little before processing next item (shorter wait for more throughput)
+                time.sleep(0.2)  # Reduced from 0.5 to improve throughput
                 self.transcription_queue.task_done()
 
             except queue.Empty:
                 # No items in queue, just continue waiting
                 pass
             except (asyncio.InvalidStateError, RuntimeError, ValueError, TypeError, OSError) as e:
-                print(f"Error in transcription worker: {e}")
+                print(f"Error in {thread_name}: {e}")
+
+        print(f"{thread_name} stopped")
 
     def process_speech_buffer(self, user):
         """Process the speech buffer for a user and queue for transcription.
@@ -510,4 +528,12 @@ class RealTimeWaveSink(WaveSink):
         self.worker_running = False
         if self.processing_timer:
             self.processing_timer.cancel()
-        print("Cleaning up sink resources...")
+
+        # Wait for worker threads to finish
+        for thread in self.worker_threads:
+            if thread.is_alive():
+                print(f"Waiting for {thread.name} to terminate...")
+                # Don't join daemon threads - they'll terminate when the process exits
+
+        print(
+            f"Cleaning up sink resources - {self.num_workers} workers stopped")

@@ -4,13 +4,21 @@ Audio transcription and translation utilities.
 This module provides functions for transcribing audio to text using Whisper
 and translating text between languages using DeepL's API. It includes a preloaded
 Whisper model to improve performance across multiple transcription requests.
+
+Features:
+- Confidence-based transcription filtering
+- Common hallucination detection for short audio segments
+- Automatic language detection
+- Translation optimization to preserve API quota
+- Pipeline warm-up for improved first-inference performance
+- Multi-worker compatible model sharing
 """
 import os
 import wave
+import string
 import numpy as np
 import whisper
 import requests
-import string
 
 
 # Preload the Whisper model globally
@@ -23,7 +31,22 @@ print("Whisper model loaded successfully!")
 
 
 async def transcribe(audio_file_path):
-    """Transcribe speech from an audio file to text with confidence filtering."""
+    """Transcribe speech from an audio file to text with confidence filtering.
+
+    This function processes audio through the Whisper model and applies multiple
+    filtering layers to ensure quality output:
+    1. General confidence threshold for all transcriptions
+    2. Stricter threshold for common hallucinated phrases like "thank you"
+    3. Language detection to determine if translation is needed
+
+    Args:
+        audio_file_path (str): Path to the audio file to transcribe
+
+    Returns:
+        tuple: (transcribed_text, detected_language)
+            - transcribed_text (str): The transcribed text or empty if filtered
+            - detected_language (str): ISO language code detected by Whisper
+    """
     # Use the preloaded model for transcription
     result = MODEL.transcribe(audio_file_path, fp16=True)
 
@@ -96,7 +119,19 @@ async def translate(text):
 
 
 async def should_translate(text, detected_language):
-    """Determine if text needs translation based on language and content."""
+    """Determine if text needs translation based on language and content.
+
+    This function optimizes translation API usage by avoiding unnecessary
+    translations of English text, while still detecting mixed-language content
+    that might need translation.
+
+    Args:
+        text (str): The text to potentially translate
+        detected_language (str): Language code detected by Whisper
+
+    Returns:
+        bool: True if text should be translated, False otherwise
+    """
     # Always skip empty text
     if not text:
         return False

@@ -106,7 +106,8 @@ async def main(client):
         @client.event
         async def on_voice_state_update(member, before, after):
             print(
-                f"Voice state update: {member.display_name} moved {before.channel} -> {after.channel}")
+                f"Voice state update: {member.display_name}"
+                f"moved {before.channel} -> {after.channel}")
 
             # Get current voice channel if connected
             current_channel = None

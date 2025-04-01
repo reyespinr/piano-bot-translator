@@ -429,7 +429,19 @@ class RealTimeWaveSink(WaveSink):
             print(f"Error creating WAV file for user {user}: {e}")
 
     async def transcribe_audio(self, audio_file, user):
-        """Transcribe the audio file and update the GUI with results."""
+        """Transcribe the audio file and update the GUI with results.
+
+        This method handles the full audio processing pipeline:
+        1. Calling the transcription model (Whisper)
+        2. Confidence filtering via utils.transcribe()
+        3. Language detection and selective translation
+        4. GUI updates with results
+        5. Audio file cleanup
+
+        Args:
+            audio_file (str): Path to the temporary WAV file to process
+            user (str): User ID of the speaker
+        """
         try:
             # Skip if file doesn't exist
             if not os.path.exists(audio_file):

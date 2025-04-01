@@ -120,6 +120,14 @@ class RealTimeWaveSink(WaveSink):
         try:
             current_time = time.time()
 
+            # Check if user is enabled for processing
+            if (hasattr(self, 'parent') and self.parent and
+                    hasattr(self.parent, 'user_processing_enabled')):
+                if int(user) in self.parent.user_processing_enabled and not self.parent.user_processing_enabled[int(user)]:
+                    # User is disabled, just write to main buffer and skip processing
+                    super().write(data, user)
+                    return
+
             # Update last activity time when any audio is processed
             self.last_activity_time = current_time
 

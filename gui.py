@@ -19,7 +19,8 @@ from PyQt5.QtWidgets import (
     QStyledItemDelegate,
     QListView,
     QTextEdit,
-    QMessageBox
+    QMessageBox,
+    QVBoxLayout
 )
 # pylint: enable=no-name-in-module
 import sound
@@ -191,6 +192,15 @@ class Connection:
 
                 self.parent.vc = self.voice  # Assign the voice client to the GUI instance
                 print(f"Connected to voice channel: {self.voice.channel.name}")
+
+                # Populate connected users when joining a channel
+                self.parent.connected_users = [
+                    member for member in selection.members if member.id != self.parent.bot.user.id
+                ]
+                # Update the UI with initial user list
+                self.parent.update_connected_users(self.parent.connected_users)
+                print(
+                    f"Initial users: {[user.display_name for user in self.parent.connected_users]}")
 
                 # Automatically initialize the audio stream with the current device
                 self.change_device()
@@ -413,14 +423,14 @@ class GUI(QMainWindow):
         self.transcribed_display.setReadOnly(True)
         self.transcribed_display.setPlaceholderText("Transcribed Text")
         self.transcribed_display.setMinimumHeight(400)
-        self.layout.addWidget(self.transcribed_display, 4,
+        self.layout.addWidget(self.transcribed_display, 5,
                               0, 1, 4)  # Spanning all columns
 
         self.translated_display = QTextEdit()
         self.translated_display.setReadOnly(True)
         self.translated_display.setPlaceholderText("Translated Text")
         self.translated_display.setMinimumHeight(400)
-        self.layout.addWidget(self.translated_display, 5,
+        self.layout.addWidget(self.translated_display, 6,
                               0, 1, 4)  # Spanning all columns
 
         # Emergency stop button
@@ -430,6 +440,36 @@ class GUI(QMainWindow):
             "background-color: darkred; color: white; font-weight: bold;")
         self.emergency_stop.clicked.connect(self.force_stop_listening)
         self.layout.addWidget(self.emergency_stop, 3, 0)
+
+        # Add user tracking with processing enabled/disabled state
+        self.user_processing_enabled = {}  # Maps user IDs to boolean enabled state
+
+        # Add user toggle panel - place after the emergency stop button
+        self.user_toggle_label = QLabel("Active Users:")
+        self.user_toggle_label.setObjectName("label")
+        # Position next to emergency stop
+        self.layout.addWidget(self.user_toggle_label, 3, 1)
+
+        # Scrollable area for user toggles
+        self.user_toggle_area = QFrame()
+        self.user_toggle_layout = QVBoxLayout(self.user_toggle_area)
+        self.user_toggle_layout.setContentsMargins(0, 0, 0, 0)
+        self.user_toggle_area.setLayout(self.user_toggle_layout)
+        # Position above transcription area
+        self.layout.addWidget(self.user_toggle_area, 4, 0, 1, 2)
+
+        # Adjust transcription and translation display positions
+        # Move them down by 1 row
+        self.layout.removeWidget(self.transcribed_display)
+        self.layout.removeWidget(self.translated_display)
+        self.layout.addWidget(self.transcribed_display, 5, 0, 1, 4)
+        self.layout.addWidget(self.translated_display, 6, 0, 1, 4)
+
+        # Add frame style and background color to user toggle area
+        self.user_toggle_area.setFrameStyle(QFrame.Panel | QFrame.Raised)
+        self.user_toggle_area.setMinimumHeight(100)  # Ensure minimum height
+        self.user_toggle_area.setStyleSheet(
+            "background-color: rgba(200, 200, 200, 30);")  # Subtle background
 
         # build window
         titlebar = TitleBar(self)
@@ -662,3 +702,94 @@ class GUI(QMainWindow):
 
         # Accept the close event and proceed with closing
         event.accept()
+
+    def update_connected_users(self, users):
+        """Update the user toggle UI with current connected users."""
+        # Complete destruction and recreation of the layout container
+        old_layout = self.user_toggle_layout
+
+        # Create a brand new layout
+        self.user_toggle_layout = QVBoxLayout()
+        self.user_toggle_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Delete the old container widget and create a new one
+        old_widget = self.user_toggle_area
+        self.user_toggle_area = QFrame()
+        self.user_toggle_area.setFrameStyle(QFrame.Panel | QFrame.Raised)
+        self.user_toggle_area.setMinimumHeight(100)
+        self.user_toggle_area.setStyleSheet(
+            "background-color: rgba(200, 200, 200, 30);")
+        self.user_toggle_area.setLayout(self.user_toggle_layout)
+
+        # Replace the old widget in the grid layout
+        self.layout.replaceWidget(old_widget, self.user_toggle_area)
+
+        # Schedule the old widget for deletion
+        old_widget.setParent(None)
+        old_widget.deleteLater()
+
+        # Show a message if no users
+        if not users:
+            empty_label = QLabel("No users in channel")
+            empty_label.setStyleSheet("color: gray;")
+            self.user_toggle_layout.addWidget(empty_label)
+            return
+
+        # Rest of your existing user toggle creation code...
+        # Create toggle for each user
+        seen_user_ids = set()
+
+        for user in users:
+            # Skip if we've already processed this user
+            if user.id in seen_user_ids:
+                continue
+            seen_user_ids.add(user.id)
+
+            # Initialize enabled state if not exists
+            if user.id not in self.user_processing_enabled:
+                self.user_processing_enabled[user.id] = True
+
+            # Create user toggle switch
+            user_frame = QFrame()
+            user_layout = QHBoxLayout(user_frame)
+            user_layout.setContentsMargins(0, 0, 0, 0)
+
+            # User label
+            user_label = QLabel(user.display_name)
+            user_layout.addWidget(user_label)
+
+            # Toggle switch
+            user_toggle = QPushButton()
+            user_toggle.setCheckable(True)
+            user_toggle.setChecked(self.user_processing_enabled[user.id])
+            user_toggle.setText(
+                "Enabled" if self.user_processing_enabled[user.id] else "Disabled")
+            user_toggle.setStyleSheet(
+                "background-color: #4CAF50;" if self.user_processing_enabled[user.id]
+                else "background-color: #F44336;"
+            )
+
+            # Store user ID in the button (for identifying in callback)
+            user_toggle.user_id = user.id
+
+            # Connect toggle button to handler
+            user_toggle.clicked.connect(
+                lambda checked, btn=user_toggle: self.toggle_user_processing(btn))
+
+            user_layout.addWidget(user_toggle)
+            self.user_toggle_layout.addWidget(user_frame)
+
+    def toggle_user_processing(self, button):
+        """Toggle audio processing for specific user."""
+        user_id = button.user_id
+        enabled = button.isChecked()
+        self.user_processing_enabled[user_id] = enabled
+
+        # Update button appearance
+        button.setText("Enabled" if enabled else "Disabled")
+        button.setStyleSheet(
+            "background-color: #4CAF50;" if enabled else "background-color: #F44336;"
+        )
+
+        print(
+            f"Audio processing for user {user_id} is now {'enabled' if enabled else 'disabled'}")

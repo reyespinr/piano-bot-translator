@@ -105,60 +105,53 @@ async def main(client):
 
         @client.event
         async def on_voice_state_update(member, before, after):
-            print("Voice state update detected...")  # Debugging statement
+            print(
+                f"Voice state update: {member.display_name} moved {before.channel} -> {after.channel}")
 
-            # Handle the bot moving to a new channel
-            if member.id == client.user.id and before.channel != after.channel:
-                print(
-                    f"Bot moved to a new channel: {after.channel.name if after.channel else 'None'}"
-                )
-                if after.channel:
-                    bot_ui.connected_users = [
-                        member for member in after.channel.members if member.id != client.user.id
-                    ]
-                    print(
-                        f"Bot moved to a new channel: "
-                        f"{after.channel.name if after.channel else 'None'}"
-                    )
-                else:
-                    bot_ui.connected_users = []
-                    print(
-                        "Bot is no longer in a voice channel. Connected users cleared."
-                    )
-
-            # Ignore the bot itself for other updates
-            if member.id == client.user.id:
-                print("Ignoring voice state update for the bot itself.")
-                return
-
-            # Check if the bot is connected to a voice channel
+            # Get current voice channel if connected
+            current_channel = None
             if bot_ui.vc and bot_ui.vc.channel:
                 current_channel = bot_ui.vc.channel
+                print(f"Bot is currently in: {current_channel.name}")
 
-                # Handle users joining the channel
-                if after.channel == current_channel:
-                    if member not in bot_ui.connected_users:
-                        bot_ui.connected_users.append(member)
-                        print(
-                            f"User {member.display_name} added to connected_users list."
-                        )
-                        print(
-                            f"Updated connected_users list: "
-                            f"{[user.display_name for user in bot_ui.connected_users]}"
-                        )
+            # Handle the bot moving to a new channel
+            if member.id == client.user.id:
+                print(
+                    f"Bot voice state changed: {before.channel} -> {after.channel}")
 
-                # Handle users leaving the channel
-                if (before.channel == current_channel and
-                        after.channel != current_channel):
-                    if member in bot_ui.connected_users:
-                        bot_ui.connected_users.remove(member)
-                        print(
-                            f"User {member.display_name} removed from connected_users list."
-                        )
-                        print(
-                            f"Updated connected_users list: "
-                            f"{[user.display_name for user in bot_ui.connected_users]}"
-                        )
+                if after.channel:
+                    print(f"Bot is now in channel: {after.channel.name}")
+                    # Clear previous users list completely
+                    bot_ui.connected_users = []
+                    # Add all members in the new channel except the bot
+                    bot_ui.connected_users = [
+                        m for m in after.channel.members if m.id != client.user.id
+                    ]
+                    # Update the UI
+                    bot_ui.update_connected_users(bot_ui.connected_users)
+                else:
+                    # Bot left all voice channels
+                    bot_ui.connected_users = []
+                    bot_ui.update_connected_users([])
+                    print("Bot left all voice channels, cleared user list")
+                return  # Important to return here to avoid confusion with other state changes
+
+            # Skip if not in a voice channel
+            if not current_channel:
+                print("Bot is not in a voice channel, skipping member state update")
+                return
+
+            # IMPORTANT: Always rebuild the user list completely when anyone's voice state changes
+            # This ensures we never have stale/outdated entries
+            if current_channel:
+                # Rebuild the entire list from current channel members
+                bot_ui.connected_users = [
+                    m for m in current_channel.members if m.id != client.user.id
+                ]
+                print(
+                    f"Rebuilt user list: {[user.display_name for user in bot_ui.connected_users]}")
+                # Update the UI with refreshed list
+                bot_ui.update_connected_users(bot_ui.connected_users)
 
         await client.start(token)
 

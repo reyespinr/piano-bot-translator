@@ -59,6 +59,7 @@ class RealTimeWaveSink(WaveSink):
         self.is_speaking = {}
         self.silence_frames = {}
         self.speech_detected = {}
+        self.last_processed_time = {}
 
         # Audio buffers
         self.speech_buffers = {}
@@ -277,11 +278,23 @@ class RealTimeWaveSink(WaveSink):
         speech_buffer.seek(0, os.SEEK_END)
         buffer_size = speech_buffer.tell()
 
-        # Skip if buffer is too small
-        if buffer_size < 8000:  # ~1/6 second minimum
+        # Calculate approximate duration in seconds (48000 Hz, 16-bit stereo)
+        # 48000 samples/sec * 2 bytes/sample * 2 channels = 192000 bytes/sec
+        duration_seconds = buffer_size / 192000
+
+        # Adjust minimum duration based on queue size
+        min_duration = 1 if self.transcription_queue.qsize() < 3 else 2
+        if duration_seconds < min_duration:
             print(
-                f"Speech buffer for user {user} is too small ({buffer_size} bytes), skipping.")
+                f"Speech too short ({duration_seconds:.2f}s < {min_duration:.2f}s), skipping.")
             return
+
+        current_time = time.time()
+        if user in self.last_processed_time:
+            time_since_last = current_time - self.last_processed_time[user]
+            if time_since_last < 2.0:  # 2 second cooldown
+                print(f"Cooldown active for user {user}, skipping.")
+                return
 
         # Create a temporary WAV file
         timestamp = int(time.time())
@@ -309,6 +322,7 @@ class RealTimeWaveSink(WaveSink):
                 self.transcription_queue.put(
                     (temp_audio_file, user), block=False)
                 print(f"Added transcription task to queue for user {user}")
+                self.last_processed_time[user] = current_time
             else:
                 print(
                     f"Transcription queue full, skipping audio for user {user}")

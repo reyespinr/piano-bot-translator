@@ -436,13 +436,32 @@ class RealTimeWaveSink(WaveSink):
                 print(f"Audio file {audio_file} does not exist, skipping.")
                 return
 
-            # Get transcription and translation
-            transcribed_text = await utils.transcribe(audio_file)
-            translated_text = await utils.translate(transcribed_text) if transcribed_text else ""
+            # Get transcription and detected language
+            transcribed_text, detected_language = await utils.transcribe(audio_file)
+
+            # Skip processing if transcription was empty (failed confidence check)
+            if not transcribed_text:
+                print(
+                    f"Empty transcription for user {user}, skipping processing.")
+                self._cleanup_audio_file(audio_file)
+                return
+
+            # Determine if translation is needed
+            needs_translation = await utils.should_translate(transcribed_text, detected_language)
+
+            if needs_translation:
+                translated_text = await utils.translate(transcribed_text)
+                print(f"Translated from {detected_language} to English")
+            else:
+                # Skip translation for English or empty text
+                translated_text = transcribed_text
+                print(
+                    f"Skipped translation - detected language: {detected_language}")
 
             # Debug output
             print(f"Transcription for user {user}: {transcribed_text}")
-            print(f"Translation: {translated_text}")
+
+            # Rest of your function...
 
             # Update the GUI
             await self._update_gui(user, transcribed_text, translated_text)

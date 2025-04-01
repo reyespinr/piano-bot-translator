@@ -10,6 +10,7 @@ import wave
 import numpy as np
 import whisper
 import requests
+import string
 
 
 # Preload the Whisper model globally
@@ -22,21 +23,51 @@ print("Whisper model loaded successfully!")
 
 
 async def transcribe(audio_file_path):
-    """Transcribe speech from an audio file to text.
-
-    Uses the preloaded Whisper model to convert speech in an audio file
-    to text transcription.
-
-    Args:
-        audio_file_path (str): Path to the audio file to transcribe
-
-    Returns:
-        str: The transcribed text from the audio file
-    """
+    """Transcribe speech from an audio file to text with confidence filtering."""
     # Use the preloaded model for transcription
     result = MODEL.transcribe(audio_file_path, fp16=True)
-    text = result["text"]
-    return text
+
+    # Extract the detected language
+    detected_language = result.get("language", "")
+
+    # Check confidence level
+    if result["segments"]:
+        # Get average log probability across all segments
+        avg_log_prob = sum(s["avg_logprob"]
+                           for s in result["segments"]) / len(result["segments"])
+
+        # Filter out low-confidence outputs
+        confidence_threshold = -1.5  # Adjust based on testing
+
+        if avg_log_prob < confidence_threshold:
+            print(
+                f"Low confidence transcription rejected ({avg_log_prob:.2f}): '{result['text']}'")
+            return "", detected_language  # Return empty text but still include language
+
+        # Special case for common hallucinations with short audio
+        text = result["text"].strip().lower()
+
+        # Remove punctuation for comparison
+        text_clean = text.translate(str.maketrans('', '', string.punctuation))
+
+        if len(text_clean) < 15 and (
+                text_clean == "thank you" or
+                text_clean == "thanks" or
+                text_clean == "thank" or
+                text_clean == "um" or
+                text_clean == "hmm"):
+            # For these common short responses, require higher confidence
+            stricter_threshold = -0.5
+            if avg_log_prob < stricter_threshold:
+                print(
+                    f"Short statement '{text}' rejected with confidence {avg_log_prob:.2f}")
+                return "", detected_language
+
+        print(
+            f"Transcription confidence: {avg_log_prob:.2f}, Language: {detected_language}")
+
+    # Return both the text and detected language
+    return result["text"], detected_language
 
 
 async def translate(text):
@@ -62,6 +93,27 @@ async def translate(text):
     )
     translation = response.json()["translations"][0]["text"]
     return translation
+
+
+async def should_translate(text, detected_language):
+    """Determine if text needs translation based on language and content."""
+    # Always skip empty text
+    if not text:
+        return False
+
+    # Skip if dominant language is English
+    if detected_language == "en":
+        # Check if there are likely non-English segments
+        # This simple heuristic checks for characters common in non-Latin alphabets
+        non_ascii_ratio = len([c for c in text if ord(c) > 127]) / len(text)
+        if non_ascii_ratio > 0.1:  # If more than 10% non-ASCII, translate anyway
+            print(
+                f"Detected mixed language content (non-ASCII ratio: {non_ascii_ratio:.2f})")
+            return True
+        return False
+
+    # Non-English dominant language should be translated
+    return True
 
 
 def create_dummy_audio_file(filename="warmup_audio.wav"):

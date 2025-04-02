@@ -72,6 +72,25 @@ async def transcribe(audio_file_path):
     transcribed_text = result.text if result.text else ""
     detected_language = result.language if result.language else ""
 
+    # Handle Austrian German misidentified as Icelandic
+    if detected_language == "is":  # "is" is the language code for Icelandic
+        print("Detected Icelandic - likely Austrian German. Re-transcribing as German...")
+        # Re-transcribe with German as forced language
+        result = MODEL.transcribe(
+            audio_file_path,
+            vad=True,
+            vad_threshold=0.35,
+            no_speech_threshold=0.6,
+            max_instant_words=0.3,
+            suppress_silence=True,
+            only_voice_freq=True,
+            word_timestamps=True,
+            language="de"  # Force German language
+        )
+        transcribed_text = result.text if result.text else ""
+        detected_language = "de"  # Override detected language to German
+        print("Re-transcribed as German")
+
     # Apply additional confidence filtering as a safety net
     if hasattr(result, "segments") and result.segments:
         # Get confidence values

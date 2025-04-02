@@ -37,7 +37,7 @@ class Dropdown(QComboBox):
     changed = pyqtSignal(object, object)
 
     def __init__(self):
-        super(Dropdown, self).__init__()
+        super().__init__()
         self.setItemDelegate(QStyledItemDelegate())
         self.setPlaceholderText("None")
         self.setView(QListView())
@@ -54,7 +54,7 @@ class Dropdown(QComboBox):
 
 class SVGButton(QPushButton):
     def __init__(self, text=None):
-        super(SVGButton, self).__init__(text)
+        super().__init__(text)
         self.layout = QHBoxLayout()
         self.setLayout(self.layout)
         self.svg = QSvgWidget("./assets/loading.svg", self)
@@ -63,10 +63,16 @@ class SVGButton(QPushButton):
         self.layout.addWidget(self.svg)
 
     def setEnabled(self, enabled):
+        """Override setEnabled to control SVG visibility based on enabled state."""
         super().setEnabled(enabled)
         self.svg.setVisible(not enabled)
 
+    def setSvgVisible(self, visible):
+        """Set the visibility of the SVG widget directly."""
+        self.svg.setVisible(visible)
 
+
+# pylint: disable=too-many-instance-attributes
 class Connection:
     def __init__(self, layer, parent):
         self.stream = sound.PCMStream()
@@ -122,8 +128,7 @@ class Connection:
 
         for i in range(combobox.count()):
             size = metrics.horizontalAdvance(combobox.itemText(i))
-            if size > min_width:
-                min_width = size
+            min_width = max(min_width, size)
 
         combobox.setMinimumWidth(min_width + 50)
 
@@ -309,7 +314,7 @@ class Connection:
 
 class TitleBar(QFrame):
     def __init__(self, parent):
-        super(TitleBar, self).__init__()
+        super().__init__()
         self.setObjectName("titlebar")
         self.parent = parent
         self.bot = parent.bot
@@ -356,17 +361,18 @@ class TitleBar(QFrame):
             except Exception:
                 pass
 
-        self.bot._closed = True
-        await self.bot.ws.close()
+        # Use the proper method to close the bot instead of accessing protected members
+        await self.bot.close()
         self.parent.close()
 
     def minimize(self):
         self.parent.showMinimized()
 
 
+# pylint: disable=too-many-instance-attributes
 class GUI(QMainWindow):
     def __init__(self, app, bot):
-        super(GUI, self).__init__()
+        super().__init__()
         QDir.setCurrent(bundle_dir)
         self.app = app
 
@@ -479,7 +485,7 @@ class GUI(QMainWindow):
 
         # load styles
         QFontDatabase.addApplicationFont("./assets/Roboto-Black.ttf")
-        with open("./assets/style.qss", "r") as qss:
+        with open("./assets/style.qss", "r", encoding="utf-8") as qss:
             self.app.setStyleSheet(qss.read())
 
         # show window
@@ -611,8 +617,10 @@ class GUI(QMainWindow):
         self.translated_display.verticalScrollBar().setValue(
             self.translated_display.verticalScrollBar().maximum())
 
-    async def process_audio_callback(self, sink, channel):
-        """Process audio data for each user."""
+    async def process_audio_callback(self):
+        """
+        Callback function to process audio data.
+        """
         print("Finished processing audio.")
 
     def force_stop_listening(self):
@@ -705,9 +713,6 @@ class GUI(QMainWindow):
 
     def update_connected_users(self, users):
         """Update the user toggle UI with current connected users."""
-        # Complete destruction and recreation of the layout container
-        old_layout = self.user_toggle_layout
-
         # Create a brand new layout
         self.user_toggle_layout = QVBoxLayout()
         self.user_toggle_layout.setContentsMargins(0, 0, 0, 0)

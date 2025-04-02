@@ -27,6 +27,8 @@ MODEL = whisper.load_model(
     "large-v3-turbo", device="cuda")  # Use "cuda" for GPU
 # MODEL = whisper.load_model(
 #     "base", device="cuda")  # Use "cuda" for GPU
+# MODEL = whisper.load_model(
+#     "large-v3", device="cuda")  # Use "cuda" for GPU
 print("Whisper model loaded successfully!")
 
 

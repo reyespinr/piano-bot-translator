@@ -1,13 +1,15 @@
 """
 Audio transcription and translation utilities.
 
-This module provides functions for transcribing audio to text using Whisper
-and translating text between languages using DeepL's API. It includes a preloaded
-Whisper model to improve performance across multiple transcription requests.
+This module provides functions for transcribing audio to text using stable-ts
+(an enhanced version of Whisper) and translating text between languages using 
+DeepL's API. It includes a preloaded model to improve performance across 
+multiple transcription requests.
 
 Features:
+- Voice Activity Detection (VAD) to filter non-speech audio
 - Confidence-based transcription filtering
-- Common hallucination detection for short audio segments
+- Common hallucination detection and prevention
 - Automatic language detection
 - Translation optimization to preserve API quota
 - Pipeline warm-up for improved first-inference performance
@@ -17,29 +19,27 @@ import os
 import wave
 import string
 import numpy as np
-import whisper
 import requests
+import stable_whisper
 
-
-# Preload the Whisper model globally
-print("Loading Whisper model...")
-MODEL = whisper.load_model(
+# Preload the stable-ts model globally
+print("Loading stable-ts model...")
+MODEL = stable_whisper.load_model(
     "large-v3-turbo", device="cuda")  # Use "cuda" for GPU
-# MODEL = whisper.load_model(
+# MODEL = stable_whisper.load_model(
 #     "base", device="cuda")  # Use "cuda" for GPU
-# MODEL = whisper.load_model(
-#     "large-v3", device="cuda")  # Use "cuda" for GPU
-print("Whisper model loaded successfully!")
+print("stable-ts model loaded successfully!")
 
 
 async def transcribe(audio_file_path):
     """Transcribe speech from an audio file to text with confidence filtering.
 
-    This function processes audio through the Whisper model and applies multiple
-    filtering layers to ensure quality output:
-    1. General confidence threshold for all transcriptions
-    2. Stricter threshold for common hallucinated phrases like "thank you"
-    3. Language detection to determine if translation is needed
+    This function processes audio through the stable-ts model with VAD (Voice
+    Activity Detection) and applies multiple filtering layers to ensure quality:
+    1. VAD to filter out non-speech audio
+    2. Focus on human speech frequencies
+    3. Additional confidence threshold filtering
+    4. Language detection to determine if translation is needed
 
     Args:
         audio_file_path (str): Path to the audio file to transcribe
@@ -49,50 +49,65 @@ async def transcribe(audio_file_path):
             - transcribed_text (str): The transcribed text or empty if filtered
             - detected_language (str): ISO language code detected by Whisper
     """
-    # Use the preloaded model for transcription
-    result = MODEL.transcribe(audio_file_path, fp16=True)
+    # Use the preloaded model for transcription with enhanced settings
+    result = MODEL.transcribe(
+        audio_file_path,
+        vad=True,                  # Enable Voice Activity Detection
+        vad_threshold=0.35,        # VAD confidence threshold
+        no_speech_threshold=0.6,   # Filter non-speech sections
+        max_instant_words=0.3,     # Reduce hallucination words
+        suppress_silence=True,     # Use silence detection for better timestamps
+        only_voice_freq=True,      # Focus on human voice frequency range
+        word_timestamps=True       # Important for proper segmentation
+    )
 
-    # Extract the detected language
-    detected_language = result.get("language", "")
+    # Extract text and detected language
+    transcribed_text = result.text if result.text else ""
+    detected_language = result.language if result.language else ""
 
-    # Check confidence level
-    if result["segments"]:
-        # Get average log probability across all segments
-        avg_log_prob = sum(s["avg_logprob"]
-                           for s in result["segments"]) / len(result["segments"])
+    # Apply additional confidence filtering as a safety net
+    if hasattr(result, "segments") and result.segments:
+        # Get confidence values
+        confidences = []
+        for segment in result.segments:
+            if hasattr(segment, "avg_logprob"):
+                confidences.append(segment.avg_logprob)
 
-        # Filter out low-confidence outputs
-        confidence_threshold = -1.5  # Adjust based on testing
+        # Apply our confidence thresholds if we have confidence data
+        if confidences:
+            avg_log_prob = sum(confidences) / len(confidences)
 
-        if avg_log_prob < confidence_threshold:
-            print(
-                f"Low confidence transcription rejected ({avg_log_prob:.2f}): '{result['text']}'")
-            return "", detected_language  # Return empty text but still include language
-
-        # Special case for common hallucinations with short audio
-        text = result["text"].strip().lower()
-
-        # Remove punctuation for comparison
-        text_clean = text.translate(str.maketrans('', '', string.punctuation))
-
-        if len(text_clean) < 15 and (
-                text_clean == "thank you" or
-                text_clean == "thanks" or
-                text_clean == "thank" or
-                text_clean == "um" or
-                text_clean == "hmm"):
-            # For these common short responses, require higher confidence
-            stricter_threshold = -0.5
-            if avg_log_prob < stricter_threshold:
+            # General confidence threshold
+            confidence_threshold = -1.5
+            if avg_log_prob < confidence_threshold:
                 print(
-                    f"Short statement '{text}' rejected with confidence {avg_log_prob:.2f}")
+                    f"Low confidence transcription rejected"
+                    f"({avg_log_prob:.2f}): '{transcribed_text}'")
                 return "", detected_language
 
-        print(
-            f"Transcription confidence: {avg_log_prob:.2f}, Language: {detected_language}")
+            # Special case for common hallucinations
+            text = transcribed_text.strip().lower()
+            text_clean = text.translate(
+                str.maketrans('', '', string.punctuation))
+
+            if len(text_clean) < 15 and (
+                    text_clean == "thank you" or
+                    text_clean == "thanks" or
+                    text_clean == "thank" or
+                    text_clean == "um" or
+                    text_clean == "hmm"):
+                # For these common short responses, require higher confidence
+                stricter_threshold = -0.5
+                if avg_log_prob < stricter_threshold:
+                    print(
+                        f"Short statement '{text}' rejected with confidence {avg_log_prob:.2f}")
+                    return "", detected_language
+
+            print(
+                f"Transcription confidence: {avg_log_prob:.2f}, Language: {detected_language}")
 
     # Return both the text and detected language
-    return result["text"], detected_language
+    return transcribed_text, detected_language
 
 
 async def translate(text):
@@ -184,7 +199,7 @@ def create_dummy_audio_file(filename="warmup_audio.wav"):
 async def warm_up_pipeline():
     """Warm up the transcription pipeline.
 
-    Runs a quick inference through the Whisper model to:
+    Runs a quick inference through the model to:
     - Pre-compile CUDA kernels
     - Allocate GPU memory
     - Initialize internal caches

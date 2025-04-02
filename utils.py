@@ -32,6 +32,11 @@ MODEL = stable_whisper.load_model(
     MODEL_NAME, device="cuda")  # Use "cuda" for GPU
 print("stable-ts model loaded successfully!")
 
+# Common hallucinations to filter out
+COMMON_HALLUCINATIONS = {
+    "thank you", "thanks", "thank", "um", "hmm"
+}
+
 
 async def transcribe(audio_file_path):
     """Transcribe speech from an audio file to text with confidence filtering.
@@ -92,12 +97,7 @@ async def transcribe(audio_file_path):
             text_clean = text.translate(
                 str.maketrans('', '', string.punctuation))
 
-            if len(text_clean) < 15 and (
-                    text_clean == "thank you" or
-                    text_clean == "thanks" or
-                    text_clean == "thank" or
-                    text_clean == "um" or
-                    text_clean == "hmm"):
+            if len(text_clean) < 15 and text_clean in COMMON_HALLUCINATIONS:
                 # For these common short responses, require higher confidence
                 stricter_threshold = -0.5
                 if avg_log_prob < stricter_threshold:

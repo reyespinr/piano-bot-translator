@@ -1,3 +1,18 @@
+"""
+Test script for evaluating the transcription performance of utils.py.
+
+This script measures the performance and accuracy of the current transcription
+implementation in utils.py by:
+1. Loading the model and warming up the pipeline
+2. Measuring the time required to transcribe a test audio file
+3. Outputting the transcription results, language detection, and timing data
+
+The output is formatted for easy copying into test_stable.py to enable direct 
+comparisons between different transcription implementations.
+
+Usage:
+    python test_current.py
+"""
 import os
 import time
 import asyncio

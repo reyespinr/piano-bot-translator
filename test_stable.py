@@ -1,8 +1,24 @@
+"""
+Test script for evaluating stable-ts transcription performance.
+
+This script measures the performance and accuracy of the stable-ts implementation
+of Whisper and compares it against previous results from the standard Whisper
+implementation. It evaluates:
+1. Transcription speed and efficiency
+2. Language detection accuracy
+3. Text quality and confidence scores
+4. Hallucination prevention (especially for "thank you" hallucinations)
+
+The script requires manually entering previous Whisper results for direct comparison.
+
+Usage:
+    python test_stable.py
+"""
 import os
 import time
 import asyncio
-import stable_whisper
 import wave
+import stable_whisper
 import numpy as np
 
 
@@ -95,6 +111,12 @@ async def test_stable_ts(audio_file):
 
 
 async def main():
+    """Run the stable-ts test and compare with previous Whisper results.
+
+    This function loads a test audio file, processes it with stable-ts,
+    and compares the results with previously recorded standard Whisper results
+    for speed, accuracy, and hallucination prevention.
+    """
     # Get previous results from the last run (to avoid re-running utils.transcribe)
     # Replace these values with your previous test results
     # Replace with actual previous result
@@ -114,32 +136,33 @@ async def main():
     print(f"Processing time: {current_time:.2f}s\n")
 
     print("===== Testing stable-ts Implementation =====")
-    stable_text, stable_lang, stable_transcribe_time, confidence_info = await test_stable_ts(test_file)
+    text, lang, transcribe_time, confidence_info = await test_stable_ts(test_file)
 
-    print(f"Detected language: {stable_lang}")
-    print(f"Transcription: \"{stable_text}\"{confidence_info}")
-    print(f"Processing time: {stable_transcribe_time:.2f}s\n")
+    print(f"Detected language: {lang}")
+    print(f"Transcription: \"{text}\"{confidence_info}")
+    print(f"Processing time: {transcribe_time:.2f}s\n")
 
     # Compare transcription time (most relevant for your use case)
     print("===== Performance Comparison =====")
     print(f"Previous Whisper: {current_time:.2f}s")
-    print(f"stable-ts: {stable_transcribe_time:.2f}s")
-    time_diff = current_time - stable_transcribe_time
-    percent = abs(time_diff)/min(current_time, stable_transcribe_time)*100
+    print(f"stable-ts: {transcribe_time:.2f}s")
+    time_diff = current_time - transcribe_time
+    percent = abs(time_diff)/min(current_time, transcribe_time)*100
     faster = "faster" if time_diff > 0 else "slower"
     print(
-        f"Difference: {abs(time_diff):.2f}s ({percent:.1f}% {faster} than previous approach)")
+        f"Difference: {abs(time_diff):.2f}s "
+        f"({percent:.1f}% {faster} than previous approach)")
 
     # Quality assessment
     print("\n===== Transcription Quality Comparison =====")
     print("Please review both transcriptions:")
     print(f"1. Previous: \"{current_text}\"")
-    print(f"2. stable-ts: \"{stable_text}\"")
+    print(f"2. stable-ts: \"{text}\"")
 
     # Special hallucination test for "thank you"
     print("\n===== Special Hallucination Test =====")
     count_current = current_text.lower().count("thank you")
-    count_stable = stable_text.lower().count("thank you")
+    count_stable = text.lower().count("thank you")
     print(f"'thank you' instances in Previous: {count_current}")
     print(f"'thank you' instances in stable-ts: {count_stable}")
 

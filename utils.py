@@ -23,11 +23,13 @@ import requests
 import stable_whisper
 
 # Preload the stable-ts model globally
-print("Loading stable-ts model...")
+# Uncomment the model you want to use
+MODEL_NAME = "large-v3-turbo"  # Use "large-v3-turbo" for best performance
+# MODEL_NAME = "base"  # Use "base" for faster inference
+# MODEL_NAME = "large-v3"  # Use "large-v3" for better accuracy but slower inference?
+print(f"Loading stable-ts {MODEL_NAME} model...")
 MODEL = stable_whisper.load_model(
-    "large-v3-turbo", device="cuda")  # Use "cuda" for GPU
-# MODEL = stable_whisper.load_model(
-#     "base", device="cuda")  # Use "cuda" for GPU
+    MODEL_NAME, device="cuda")  # Use "cuda" for GPU
 print("stable-ts model loaded successfully!")
 
 

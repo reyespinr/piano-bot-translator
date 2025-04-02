@@ -51,7 +51,97 @@ debug_logger.addHandler(debug_handler)
 opus_path = os.path.join(os.path.dirname(__file__), 'libopus.dll')
 discord.opus.load_opus(opus_path)
 
+
+async def setup_gui(client):
+    """Set up the GUI application."""
+    app = QApplication(sys.argv)
+    bot_ui = gui.GUI(app, client)
+    asyncio.ensure_future(bot_ui.ready())
+    asyncio.ensure_future(bot_ui.run_Qt())
+    return bot_ui
+
+
+async def handle_discord_error(error_type, message):
+    """Display an error message dialog."""
+    msg = QMessageBox()
+    msg.setWindowTitle(error_type)
+    msg.setText(message)
+    msg.setIcon(
+        QMessageBox.Critical if "Error" in error_type else QMessageBox.Information)
+    msg.exec()
+
+
 # Main function
+async def setup_event_handlers(client, bot_ui):
+    """Set up Discord event handlers for the bot."""
+
+    @client.event
+    async def on_ready() -> None:
+        print(f'Logged in as {client.user}')
+        print("Bot is ready and waiting for voice state updates...")
+        # Check if the bot is already connected to a voice channel
+        if client.voice_clients:
+            vc = client.voice_clients[0]
+            bot_ui.vc = vc  # Assign the voice client to the GUI instance
+            print(f"Bot is connected to voice channel: {vc.channel.name}")
+            # Populate and display the connected users list
+            bot_ui.connected_users = [
+                member for member in vc.channel.members if member.id != client.user.id
+            ]
+            print(
+                f"Connected users: {[user.display_name for user in bot_ui.connected_users]}"
+            )
+
+    @client.event
+    async def on_voice_state_update(member, before, after) -> None:
+        print(
+            f"Voice state update: {member.display_name} "
+            f"moved {before.channel} -> {after.channel}")
+
+        # Get current voice channel if connected
+        current_channel = None
+        if bot_ui.vc and bot_ui.vc.channel:
+            current_channel = bot_ui.vc.channel
+            print(f"Bot is currently in: {current_channel.name}")
+
+        # Handle the bot moving to a new channel
+        if member.id == client.user.id:
+            print(
+                f"Bot voice state changed: {before.channel} -> {after.channel}")
+
+            if after.channel:
+                print(f"Bot is now in channel: {after.channel.name}")
+                # Clear previous users list completely
+                bot_ui.connected_users = []
+                # Add all members in the new channel except the bot
+                bot_ui.connected_users = [
+                    m for m in after.channel.members if m.id != client.user.id
+                ]
+                # Update the UI
+                bot_ui.update_connected_users(bot_ui.connected_users)
+            else:
+                # Bot left all voice channels
+                bot_ui.connected_users = []
+                bot_ui.update_connected_users([])
+                print("Bot left all voice channels, cleared user list")
+            return  # Important to return here to avoid confusion with other state changes
+
+        # Skip if not in a voice channel
+        if not current_channel:
+            print("Bot is not in a voice channel, skipping member state update")
+            return
+
+        # IMPORTANT: Always rebuild the user list completely when anyone's voice state changes
+        # This ensures we never have stale/outdated entries
+        if current_channel:
+            # Rebuild the entire list from current channel members
+            bot_ui.connected_users = [
+                m for m in current_channel.members if m.id != client.user.id
+            ]
+            print(
+                f"Rebuilt user list: {[user.display_name for user in bot_ui.connected_users]}")
+            # Update the UI with refreshed list
+            bot_ui.update_connected_users(bot_ui.connected_users)
 
 
 async def main(client):
@@ -75,109 +165,30 @@ async def main(client):
         Exception: For any other errors that occur during execution
     """
     try:
-        token = open("token.txt", "r", encoding="utf-8").read()
+        with open("token.txt", "r", encoding="utf-8") as token_file:
+            token = token_file.read().strip()
 
         # Warm up the ML pipeline to reduce first-use latency
         await utils.warm_up_pipeline()
 
         # Initialize the GUI
-        app = QApplication(sys.argv)
-        bot_ui = gui.GUI(app, client)
-        asyncio.ensure_future(bot_ui.ready())
-        asyncio.ensure_future(bot_ui.run_Qt())
+        bot_ui = await setup_gui(client)
 
-        @client.event
-        async def on_ready():
-            print(f'Logged in as {client.user}')
-            print("Bot is ready and waiting for voice state updates...")
-            # Check if the bot is already connected to a voice channel
-            if client.voice_clients:
-                vc = client.voice_clients[0]
-                bot_ui.vc = vc  # Assign the voice client to the GUI instance
-                print(f"Bot is connected to voice channel: {vc.channel.name}")
-                # Populate and display the connected users list
-                bot_ui.connected_users = [
-                    member for member in vc.channel.members if member.id != client.user.id
-                ]
-                print(
-                    f"Connected users: {[user.display_name for user in bot_ui.connected_users]}"
-                )
-
-        @client.event
-        async def on_voice_state_update(member, before, after):
-            print(
-                f"Voice state update: {member.display_name}"
-                f"moved {before.channel} -> {after.channel}")
-
-            # Get current voice channel if connected
-            current_channel = None
-            if bot_ui.vc and bot_ui.vc.channel:
-                current_channel = bot_ui.vc.channel
-                print(f"Bot is currently in: {current_channel.name}")
-
-            # Handle the bot moving to a new channel
-            if member.id == client.user.id:
-                print(
-                    f"Bot voice state changed: {before.channel} -> {after.channel}")
-
-                if after.channel:
-                    print(f"Bot is now in channel: {after.channel.name}")
-                    # Clear previous users list completely
-                    bot_ui.connected_users = []
-                    # Add all members in the new channel except the bot
-                    bot_ui.connected_users = [
-                        m for m in after.channel.members if m.id != client.user.id
-                    ]
-                    # Update the UI
-                    bot_ui.update_connected_users(bot_ui.connected_users)
-                else:
-                    # Bot left all voice channels
-                    bot_ui.connected_users = []
-                    bot_ui.update_connected_users([])
-                    print("Bot left all voice channels, cleared user list")
-                return  # Important to return here to avoid confusion with other state changes
-
-            # Skip if not in a voice channel
-            if not current_channel:
-                print("Bot is not in a voice channel, skipping member state update")
-                return
-
-            # IMPORTANT: Always rebuild the user list completely when anyone's voice state changes
-            # This ensures we never have stale/outdated entries
-            if current_channel:
-                # Rebuild the entire list from current channel members
-                bot_ui.connected_users = [
-                    m for m in current_channel.members if m.id != client.user.id
-                ]
-                print(
-                    f"Rebuilt user list: {[user.display_name for user in bot_ui.connected_users]}")
-                # Update the UI with refreshed list
-                bot_ui.update_connected_users(bot_ui.connected_users)
+        # Set up event handlers
+        await setup_event_handlers(client, bot_ui)
 
         await client.start(token)
 
     except FileNotFoundError:
-        msg = QMessageBox()
-        msg.setWindowTitle("Token Error")
-        msg.setText("No Token Provided")
-        msg.setIcon(QMessageBox.Information)
-        msg.exec()
+        await handle_discord_error("Token Error", "No Token Provided")
 
     except discord.errors.LoginFailure:
-        msg = QMessageBox()
-        msg.setWindowTitle("Login Failed")
-        msg.setText("Please check if the token is correct")
-        msg.setIcon(QMessageBox.Information)
-        msg.exec()
+        await handle_discord_error("Login Failed", "Please check if the token is correct")
 
     except (discord.errors.HTTPException, discord.errors.GatewayNotFound,
             discord.errors.ConnectionClosed) as e:
         logging.error("Discord connection error: %s", str(e))
-        msg = QMessageBox()
-        msg.setWindowTitle("Connection Error")
-        msg.setText(f"Failed to connect to Discord: {str(e)}")
-        msg.setIcon(QMessageBox.Critical)
-        msg.exec()
+        await handle_discord_error("Connection Error", f"Failed to connect to Discord: {str(e)}")
 
     except asyncio.exceptions.CancelledError:
         logging.info("Asyncio task cancelled")

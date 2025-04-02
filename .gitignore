@@ -1,8 +1,7 @@
 __pycache__/
+build/
 token.txt
 *.exe
 *.log
 *.dll
-build/main
 .vscode
-output.wav

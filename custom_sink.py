@@ -19,9 +19,80 @@ import io
 import wave
 import queue
 import threading
+from dataclasses import dataclass
+from queue import Queue
 import numpy as np
 from discord.sinks import WaveSink
 import utils
+
+
+@dataclass
+class AudioConfig:
+    """Configuration parameters for audio processing."""
+    pause_threshold: float = 1.0
+    silence_threshold: int = 10  # Frames of silence to consider speech ended
+    force_process_timeout: float = 0.8  # Seconds to force process after silence
+
+
+@dataclass
+# pylint: disable=too-many-instance-attributes
+class UserState:
+    """Manages per-user state for audio processing."""
+    last_packet_time: float = 0
+    last_active_time: float = 0
+    is_speaking: bool = False
+    silence_frames: int = 0
+    speech_detected: bool = False
+    last_processed_time: float = 0
+    speech_buffer: io.BytesIO = None
+    pre_speech_buffer: list = None
+    energy_history: list = None
+
+    def __post_init__(self):
+        """Initialize mutable default values."""
+        if self.speech_buffer is None:
+            self.speech_buffer = io.BytesIO()
+        if self.pre_speech_buffer is None:
+            self.pre_speech_buffer = []
+        if self.energy_history is None:
+            self.energy_history = []
+
+
+@dataclass
+class SessionTracker:
+    """Tracks conversation session state."""
+    start_time: float = 0
+    state: str = "new"  # "new", "active", or "established"
+    last_speaker_change: float = 0
+    current_speakers: set = None
+    last_activity_time: float = 0
+
+    def __post_init__(self):
+        """Initialize default values that need computation."""
+        now = time.time()
+        self.start_time = now
+        self.last_speaker_change = now
+        self.last_activity_time = now
+        if self.current_speakers is None:
+            self.current_speakers = set()
+
+
+@dataclass
+class WorkerManager:
+    """Manages transcription worker threads."""
+    num_workers: int
+    event_loop: asyncio.AbstractEventLoop
+    queue: Queue = None
+    running: bool = True
+    workers: list = None
+    timer: threading.Timer = None
+
+    def __post_init__(self):
+        """Initialize mutable default values."""
+        if self.queue is None:
+            self.queue = queue.Queue(maxsize=10)
+        if self.workers is None:
+            self.workers = []
 
 
 class RealTimeWaveSink(WaveSink):
@@ -56,62 +127,54 @@ class RealTimeWaveSink(WaveSink):
     def __init__(self, *args, pause_threshold=1.0, event_loop=None, num_workers=3, **kwargs):
         super().__init__(*args, **kwargs)
 
-        # Initialize the parent class
+        # Initialize the parent class reference
         self.parent = None
 
-        # Audio processing parameters
-        self.pause_threshold = pause_threshold
-        self.silence_threshold = 10  # Frames of silence to consider speech ended
-        self.force_process_timeout = 0.8  # Seconds to force process after silence
+        # Use composition to organize related attributes
+        self.config = AudioConfig(
+            pause_threshold=pause_threshold,
+            silence_threshold=10,
+            force_process_timeout=0.8
+        )
 
-        # Worker thread configuration
-        self.num_workers = num_workers  # Number of transcription worker threads
+        self.session = SessionTracker()
 
-        # User tracking
-        self.user_last_packet_time = {}
-        self.last_active_time = {}
-        self.is_speaking = {}
-        self.silence_frames = {}
-        self.speech_detected = {}
-        self.last_processed_time = {}
+        self.workers = WorkerManager(num_workers, event_loop)
 
-        # Audio buffers
-        self.speech_buffers = {}
-        self.pre_speech_buffers = {}
-        self.energy_history = {}
+        # User state is stored in dictionaries mapping user IDs to UserState objects
+        self.users = {}
 
-        # Event loop reference for async operations
-        self.event_loop = event_loop
+        # Initialize worker threads
+        self._start_worker_threads()
 
-        # Queue for managing transcription tasks
-        self.transcription_queue = queue.Queue(maxsize=10)
-        self.worker_running = True
+        # Start the timer to check for inactive speakers
+        self._start_processing_timer()
 
-        # Start worker thread pool for transcriptions
-        self.worker_threads = []
-        for i in range(self.num_workers):
+    def _start_worker_threads(self):
+        """Initialize and start worker threads."""
+        for i in range(self.workers.num_workers):
             thread = threading.Thread(
                 target=self._transcription_worker,
                 daemon=True,
                 name=f"\nTranscriptionWorker-{i}"
             )
             thread.start()
-            self.worker_threads.append(thread)
-            print(f"Started transcription worker {i+1}/{self.num_workers}")
+            self.workers.workers.append(thread)
+            print(
+                f"Started transcription worker {i+1}/{self.workers.num_workers}")
 
-        # Start the timer to check for inactive speakers
-        self.processing_timer = threading.Timer(
+    def _start_processing_timer(self):
+        """Start the timer to check for inactive speakers."""
+        self.workers.timer = threading.Timer(
             1.0, self._check_inactive_speakers)
-        self.processing_timer.daemon = True
-        self.processing_timer.start()
+        self.workers.timer.daemon = True
+        self.workers.timer.start()
 
-        # Add session tracking variables
-        self.session_start_time = time.time()
-        self.session_state = "new"   # "new", "active", or "established"
-        self.last_speaker_change = time.time()
-        self.current_speakers = set()
-        self.silence_duration = 0
-        self.last_activity_time = time.time()
+    def _get_user_state(self, user):
+        """Get or create UserState for a user."""
+        if user not in self.users:
+            self.users[user] = UserState()
+        return self.users[user]
 
     def is_audio_active(self, audio_data, user):
         """Check if audio data contains active speech."""
@@ -121,17 +184,20 @@ class RealTimeWaveSink(WaveSink):
         # Calculate energy of the current frame
         energy = np.mean(np.abs(audio_array))
 
+        # Get user state
+        user_state = self._get_user_state(user)
+
         # Initialize energy history if needed
-        if user not in self.energy_history:
-            self.energy_history[user] = [energy] * 5
+        if not user_state.energy_history:
+            user_state.energy_history = [energy] * 5
 
         # Update energy history
-        self.energy_history[user].append(energy)
+        user_state.energy_history.append(energy)
         # Keep last 5 frames
-        self.energy_history[user] = self.energy_history[user][-5:]
+        user_state.energy_history = user_state.energy_history[-5:]
 
         # Calculate average energy over recent frames
-        avg_energy = np.mean(self.energy_history[user])
+        avg_energy = np.mean(user_state.energy_history)
 
         # Return if audio is considered active speech
         return avg_energy > 300  # Threshold for speech detection
@@ -152,29 +218,34 @@ class RealTimeWaveSink(WaveSink):
                     return
 
             # Update last activity time when any audio is processed
-            self.last_activity_time = current_time
+            self.session.last_activity_time = current_time
 
             # Initialize user-specific data structures if needed
-            if user not in self.user_last_packet_time:
-                self._initialize_user_data(user, current_time)
+            user_state = self._get_user_state(user)
+
+            # First time seeing this user?
+            if user_state.last_packet_time == 0:
+                user_state.last_packet_time = current_time
 
             # Check if the current packet contains active speech
             is_active = self.is_audio_active(data, user)
 
             # Update last active time if speech is detected
             if is_active:
-                self.last_active_time[user] = current_time
+                user_state.last_active_time = current_time
 
             # Calculate time differences
-            time_diff = current_time - self.user_last_packet_time[user]
-            active_diff = current_time - self.last_active_time[user]
+            time_diff = current_time - user_state.last_packet_time
+            active_diff = current_time - user_state.last_active_time
 
             # Process speech if silent for too long
-            if self._should_process_due_to_silence(user, active_diff):
+            if (user_state.is_speaking and
+                    user_state.speech_detected and
+                    active_diff > self.config.force_process_timeout):
                 self._process_silent_speech(user)
 
             # Handle long pauses
-            if self._is_long_pause(time_diff):
+            if time_diff > self.config.pause_threshold:
                 self._handle_long_pause(user)
 
             # Store recent frames for smoother beginning of speech
@@ -186,7 +257,7 @@ class RealTimeWaveSink(WaveSink):
                 self._handle_silence(user, data)
 
             # Update the last packet time
-            self.user_last_packet_time[user] = current_time
+            user_state.last_packet_time = current_time
 
             # Write to the main buffer
             super().write(data, user)
@@ -194,118 +265,107 @@ class RealTimeWaveSink(WaveSink):
         except (KeyError, TypeError, ValueError, AttributeError, IOError, RuntimeError) as e:
             print(f"Error in write method for user {user}: {e}")
 
-    def _initialize_user_data(self, user, current_time):
-        """Initialize data structures for a new user."""
-        self.user_last_packet_time[user] = current_time
-        self.is_speaking[user] = False
-        self.silence_frames[user] = 0
-        self.speech_detected[user] = False
-        self.speech_buffers[user] = io.BytesIO()
-        self.pre_speech_buffers[user] = []
-        self.last_active_time[user] = 0
-
-    def _should_process_due_to_silence(self, user, active_diff):
-        """Check if we should process speech due to silence duration."""
-        return (self.is_speaking[user] and
-                self.speech_detected[user] and
-                active_diff > self.force_process_timeout)
-
-    def _is_long_pause(self, time_diff):
-        """Check if there's been a long pause in receiving packets."""
-        return time_diff > self.pause_threshold
+    def _update_pre_speech_buffer(self, user, data):
+        """Update the pre-speech buffer for smoother speech beginning."""
+        user_state = self._get_user_state(user)
+        user_state.pre_speech_buffer.append(data)
+        if len(user_state.pre_speech_buffer) > 10:  # Keep ~200ms of audio
+            user_state.pre_speech_buffer.pop(0)
 
     def _process_silent_speech(self, user):
         """Process speech after detecting significant silence."""
         print(
             f"Significant pause detected for user {user}. Processing speech.")
-        self.is_speaking[user] = False
+        user_state = self._get_user_state(user)
+        user_state.is_speaking = False
         self.process_speech_buffer(user)
-        self.speech_detected[user] = False
-        self.silence_frames[user] = 0
-        self.speech_buffers[user] = io.BytesIO()
+        user_state.speech_detected = False
+        user_state.silence_frames = 0
+        user_state.speech_buffer = io.BytesIO()
 
     def _handle_long_pause(self, user):
         """Handle a long pause in audio packets."""
         print(
             f"Long pause detected for user {user}. Processing any speech and resetting.")
 
+        user_state = self._get_user_state(user)
+
         # Process any accumulated speech before resetting
-        if self.is_speaking[user] and self.speech_detected[user]:
+        if user_state.is_speaking and user_state.speech_detected:
             print(f"Processing speech before resetting for user {user}")
             self.process_speech_buffer(user)
 
         # Reset state
-        self.is_speaking[user] = False
-        self.silence_frames[user] = 0
-        self.speech_detected[user] = False
-        self.speech_buffers[user] = io.BytesIO()
-        self.pre_speech_buffers[user] = []
-
-    def _update_pre_speech_buffer(self, user, data):
-        """Update the pre-speech buffer for smoother speech beginning."""
-        self.pre_speech_buffers[user].append(data)
-        if len(self.pre_speech_buffers[user]) > 10:  # Keep ~200ms of audio
-            self.pre_speech_buffers[user].pop(0)
+        user_state.is_speaking = False
+        user_state.silence_frames = 0
+        user_state.speech_detected = False
+        user_state.speech_buffer = io.BytesIO()
+        user_state.pre_speech_buffer = []
 
     def _handle_active_speech(self, user, data):
         """Handle incoming active speech data."""
+        user_state = self._get_user_state(user)
+
         # Reset silence counter when speech is detected
-        self.silence_frames[user] = 0
+        user_state.silence_frames = 0
 
         # Mark that speech was detected in this session
-        self.speech_detected[user] = True
+        user_state.speech_detected = True
 
         # If this is the start of speech, add pre-speech buffer first
-        if not self.is_speaking[user]:
+        if not user_state.is_speaking:
             print(f"Speech started for user {user}")
-            self.is_speaking[user] = True
+            user_state.is_speaking = True
             # Add pre-speech frames for smoother beginning
-            for pre_data in self.pre_speech_buffers[user]:
-                self.speech_buffers[user].write(pre_data)
+            for pre_data in user_state.pre_speech_buffer:
+                user_state.speech_buffer.write(pre_data)
 
         # Add this audio data to the speech buffer
-        self.speech_buffers[user].write(data)
+        user_state.speech_buffer.write(data)
 
     def _handle_silence(self, user, data):
         """Handle silence after speech."""
+        user_state = self._get_user_state(user)
+
         # Add a few frames to the speech buffer for smoother transitions
-        if self.is_speaking[user] and self.silence_frames[user] < 5:
-            self.speech_buffers[user].write(data)
+        if user_state.is_speaking and user_state.silence_frames < 5:
+            user_state.speech_buffer.write(data)
 
         # Increment silence counter
-        self.silence_frames[user] += 1
+        user_state.silence_frames += 1
 
         # Check if silence has persisted long enough to consider speech ended
-        if self.is_speaking[user] and self.silence_frames[user] > self.silence_threshold:
+        if (user_state.is_speaking and
+                user_state.silence_frames > self.config.silence_threshold):
             print(f"Speech ended for user {user}. Processing audio.")
-            self.is_speaking[user] = False
+            user_state.is_speaking = False
 
             # Only process if speech was detected in this session
-            if self.speech_detected[user]:
+            if user_state.speech_detected:
                 self.process_speech_buffer(user)
-                self.speech_detected[user] = False
-                self.speech_buffers[user] = io.BytesIO()
+                user_state.speech_detected = False
+                user_state.speech_buffer = io.BytesIO()
 
     def _transcription_worker(self):
         """Background worker to process transcription queue."""
         thread_name = threading.current_thread().name
         print(f"{thread_name} started")
 
-        while self.worker_running:
+        while self.workers.running:
             try:
                 # Get item from queue with timeout
-                audio_file, user = self.transcription_queue.get(timeout=1)
+                audio_file, user = self.workers.queue.get(timeout=1)
                 print(f"{thread_name} processing audio for user {user}")
 
                 # Process the transcription
                 asyncio.run_coroutine_threadsafe(
                     self.transcribe_audio(audio_file, user),
-                    self.event_loop
+                    self.workers.event_loop
                 )
 
-                # Wait a little before processing next item (shorter wait for more throughput)
-                time.sleep(0.2)  # Reduced from 0.5 to improve throughput
-                self.transcription_queue.task_done()
+                # Wait a little before processing next item
+                time.sleep(0.2)
+                self.workers.queue.task_done()
 
             except queue.Empty:
                 # No items in queue, just continue waiting
@@ -316,110 +376,111 @@ class RealTimeWaveSink(WaveSink):
         print(f"{thread_name} stopped")
 
     def process_speech_buffer(self, user):
-        """Process the speech buffer for a user and queue for transcription.
+        """Process the speech buffer for a user and queue for transcription."""
+        user_state = self._get_user_state(user)
 
-        This method handles the conversion of recorded audio to a file for processing.
-        It implements several optimization techniques:
-        - Session-based context awareness (new/active/established states)
-        - Dynamic minimum duration thresholds based on session state
-        - User-specific cooldown periods to prevent rapid transcriptions
-        - Queue size-aware filtering to manage high-traffic periods
+        # Update session state and tracking variables
+        current_time = self._update_session_state(user)
 
-        Args:
-            user (str): User ID of the speaker
-        """
-        if user not in self.speech_buffers:
-            print(f"No speech buffer found for user {user}.")
-            return
-
-        # Update session state
-        current_time = time.time()
-
-        # Check for new conversation session
-        if user not in self.current_speakers:
-            print(f"New speaker detected: {user}")
-            self.session_state = "new"
-            self.session_start_time = current_time
-            self.current_speakers.add(user)
-            self.last_speaker_change = current_time
-
-        # Check for extended silence (10+ seconds of no activity)
-        if current_time - self.last_activity_time > 10:
-            print("Long silence detected, starting new conversation session")
-            self.session_state = "new"
-            self.session_start_time = current_time
-
-        # Session state transitions
-        time_in_session = current_time - self.session_start_time
-        if self.session_state == "new" and time_in_session > 30:
-            self.session_state = "active"
-            print("Session transitioned to active state")
-        elif self.session_state == "active" and time_in_session > 120:
-            self.session_state = "established"
-            print("Session transitioned to established state")
-
-        # Update tracking variables
-        self.last_activity_time = current_time
-
-        # Get the speech buffer
-        speech_buffer = self.speech_buffers[user]
-        speech_buffer.seek(0, os.SEEK_END)
-        buffer_size = speech_buffer.tell()
-
-        # Calculate approximate duration in seconds (48000 Hz, 16-bit stereo)
-        duration_seconds = buffer_size / 192000
-
-        # Set minimum duration based on session state and queue size
-        if self.session_state == "new":
-            # More permissive in new conversations
-            min_duration = 0.75 if self.transcription_queue.qsize() < 3 else 1.5
-            print(f"Using new session threshold: {min_duration:.2f}s")
-        elif self.session_state == "active":
-            # Normal threshold for active sessions
-            min_duration = 1 if self.transcription_queue.qsize() < 3 else 2
-        else:  # established
-            # More strict for established conversations
-            min_duration = 1.25 if self.transcription_queue.qsize() < 3 else 2.25
+        # Get audio duration and check if it meets minimum requirements
+        duration_seconds = self._get_audio_duration(user_state.speech_buffer)
+        min_duration = self._get_minimum_duration()
 
         if duration_seconds < min_duration:
             print(
                 f"Speech too short ({duration_seconds:.2f}s < {min_duration:.2f}s), skipping.")
             return
 
-        current_time = time.time()
-        if user in self.last_processed_time:
-            time_since_last = current_time - self.last_processed_time[user]
+        # Check if user is on cooldown
+        if user_state.last_processed_time > 0:
+            time_since_last = current_time - user_state.last_processed_time
             if time_since_last < 2.0:  # 2 second cooldown
                 print(f"Cooldown active for user {user}, skipping.")
                 return
 
+        # Create and process audio file
+        self._create_and_queue_audio_file(user, user_state, current_time)
+
+    def _update_session_state(self, user):
+        """Update session state based on user activity and timing."""
+        current_time = time.time()
+
+        # Check for new conversation session
+        if user not in self.session.current_speakers:
+            print(f"New speaker detected: {user}")
+            self.session.state = "new"
+            self.session.start_time = current_time
+            self.session.current_speakers.add(user)
+            self.session.last_speaker_change = current_time
+
+        # Check for extended silence
+        if current_time - self.session.last_activity_time > 10:
+            print("Long silence detected, starting new conversation session")
+            self.session.state = "new"
+            self.session.start_time = current_time
+
+        # Session state transitions
+        time_in_session = current_time - self.session.start_time
+        if self.session.state == "new" and time_in_session > 30:
+            self.session.state = "active"
+            print("Session transitioned to active state")
+        elif self.session.state == "active" and time_in_session > 120:
+            self.session.state = "established"
+            print("Session transitioned to established state")
+
+        # Update tracking variables
+        self.session.last_activity_time = current_time
+        return current_time
+
+    def _get_audio_duration(self, speech_buffer):
+        """Calculate audio duration from buffer size."""
+        speech_buffer.seek(0, os.SEEK_END)
+        buffer_size = speech_buffer.tell()
+        # Calculate approximate duration (48000 Hz, 16-bit stereo)
+        return buffer_size / 192000
+
+    def _get_minimum_duration(self):
+        """Get minimum duration threshold based on session state and queue size."""
+        queue_not_busy = self.workers.queue.qsize() < 3
+
+        if self.session.state == "new":
+            # More permissive in new conversations
+            min_duration = 0.75 if queue_not_busy else 1.5
+            print(f"Using new session threshold: {min_duration:.2f}s")
+        elif self.session.state == "active":
+            # Normal threshold for active sessions
+            min_duration = 1.0 if queue_not_busy else 2.0
+        else:  # established
+            # More strict for established conversations
+            min_duration = 1.25 if queue_not_busy else 2.25
+
+        return min_duration
+
+    def _create_and_queue_audio_file(self, user, user_state, current_time):
+        """Create WAV file from buffer and add to transcription queue."""
         # Create a temporary WAV file
         timestamp = int(time.time())
         temp_audio_file = f"{user}_{timestamp}_speech.wav"
-        speech_buffer.seek(0)  # Reset buffer pointer
 
         try:
             # Write the speech data to a WAV file
-            speech_buffer.seek(0)  # Reset buffer pointer
+            user_state.speech_buffer.seek(0)  # Reset buffer pointer
             with open(temp_audio_file, 'wb') as out_f:
                 wf = wave.Wave_write(out_f)
                 wf.setnchannels(2)  # Stereo
                 wf.setsampwidth(2)  # 16-bit
                 wf.setframerate(48000)  # 48kHz (Discord's standard)
-                wf.writeframes(speech_buffer.read())
+                wf.writeframes(user_state.speech_buffer.read())
                 wf.close()
 
-            print(
-                f"Processing speech for user {user}, "
-                f"audio file size: {os.path.getsize(temp_audio_file)} bytes"
-            )
+            print(f"Processing speech for user {user}, "
+                  f"audio file size: {os.path.getsize(temp_audio_file)} bytes")
 
             # Add to transcription queue
-            if not self.transcription_queue.full():
-                self.transcription_queue.put(
-                    (temp_audio_file, user), block=False)
+            if not self.workers.queue.full():
+                self.workers.queue.put((temp_audio_file, user), block=False)
                 print(f"Added transcription task to queue for user {user}")
-                self.last_processed_time[user] = current_time
+                user_state.last_processed_time = current_time
             else:
                 print(
                     f"Transcription queue full, skipping audio for user {user}")
@@ -429,19 +490,7 @@ class RealTimeWaveSink(WaveSink):
             print(f"Error creating WAV file for user {user}: {e}")
 
     async def transcribe_audio(self, audio_file, user):
-        """Transcribe the audio file and update the GUI with results.
-
-        This method handles the full audio processing pipeline:
-        1. Calling the transcription model (Whisper)
-        2. Confidence filtering via utils.transcribe()
-        3. Language detection and selective translation
-        4. GUI updates with results
-        5. Audio file cleanup
-
-        Args:
-            audio_file (str): Path to the temporary WAV file to process
-            user (str): User ID of the speaker
-        """
+        """Transcribe the audio file and update the GUI with results."""
         try:
             # Skip if file doesn't exist
             if not os.path.exists(audio_file):
@@ -473,8 +522,6 @@ class RealTimeWaveSink(WaveSink):
             # Debug output
             print(f"Transcription for user {user}: {transcribed_text}")
 
-            # Rest of your function...
-
             # Update the GUI
             await self._update_gui(user, transcribed_text, translated_text)
 
@@ -497,20 +544,13 @@ class RealTimeWaveSink(WaveSink):
                 user_name = member.display_name if member else f"User {user}"
 
                 # Format display text
-                if transcribed_text:
-                    display_transcription = f"{user_name}: {transcribed_text}"
-                else:
-                    display_transcription = ""
+                transcription = f"{user_name}: {transcribed_text}" if transcribed_text else ""
+                translation = f"{user_name}: {translated_text}" if translated_text else ""
 
-                if translated_text:
-                    display_translation = f"{user_name}: {translated_text}"
-                else:
-                    display_translation = ""
-
-                if display_transcription and display_translation:
+                if transcription and translation:
                     # Update the GUI
                     self.parent.update_text_display(
-                        display_transcription, display_translation)
+                        transcription, translation)
             else:
                 print("Could not update GUI: Missing voice client or parent reference")
         except (AttributeError, TypeError, ValueError) as e:
@@ -529,42 +569,37 @@ class RealTimeWaveSink(WaveSink):
         try:
             current_time = time.time()
 
-            # Check each active speaker
-            for user, is_speaking in list(self.is_speaking.items()):
-                if is_speaking and user in self.speech_detected and self.speech_detected[user]:
+            # Check each user
+            for user, user_state in list(self.users.items()):
+                if (user_state.is_speaking and
+                        user_state.speech_detected):
                     # Check time since last packet
-                    time_since_last_packet = current_time - \
-                        self.user_last_packet_time.get(user, 0)
+                    time_since_last = current_time - user_state.last_packet_time
 
                     # Process if inactive for too long
-                    if time_since_last_packet > self.force_process_timeout:
+                    if time_since_last > self.config.force_process_timeout:
                         print(
                             f"Timer detected inactive speaker {user}. Processing speech.")
-                        self.is_speaking[user] = False
+                        user_state.is_speaking = False
                         self.process_speech_buffer(user)
-                        self.speech_detected[user] = False
-                        self.speech_buffers[user] = io.BytesIO()
+                        user_state.speech_detected = False
+                        user_state.speech_buffer = io.BytesIO()
         except (KeyError, AttributeError, TypeError, ValueError) as e:
             print(f"Error checking inactive speakers: {e}")
         finally:
             # Reschedule the timer if still running
-            if self.worker_running:
-                self.processing_timer = threading.Timer(
+            if self.workers.running:
+                self.workers.timer = threading.Timer(
                     0.5, self._check_inactive_speakers)
-                self.processing_timer.daemon = True
-                self.processing_timer.start()
+                self.workers.timer.daemon = True
+                self.workers.timer.start()
 
     def cleanup(self):
         """Clean up resources when the sink is no longer needed."""
-        self.worker_running = False
-        if self.processing_timer:
-            self.processing_timer.cancel()
+        self.workers.running = False
+        if self.workers.timer:
+            self.workers.timer.cancel()
 
-        # Wait for worker threads to finish
-        for thread in self.worker_threads:
-            if thread.is_alive():
-                print(f"Waiting for {thread.name} to terminate...")
-                # Don't join daemon threads - they'll terminate when the process exits
-
+        # Worker threads are daemon threads and will terminate when the program exits
         print(
-            f"Cleaning up sink resources - {self.num_workers} workers stopped")
+            f"Cleaning up sink resources - {self.workers.num_workers} workers stopped")

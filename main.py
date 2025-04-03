@@ -71,7 +71,6 @@ async def handle_discord_error(error_type, message):
     msg.exec()
 
 
-# Main function
 async def setup_event_handlers(client, bot_ui):
     """Set up Discord event handlers for the bot."""
 

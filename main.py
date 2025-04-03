@@ -57,7 +57,7 @@ async def setup_gui(client):
     app = QApplication(sys.argv)
     bot_ui = gui.GUI(app, client)
     asyncio.ensure_future(bot_ui.ready())
-    asyncio.ensure_future(bot_ui.run_Qt())
+    asyncio.ensure_future(bot_ui.run_qt())
     return bot_ui
 
 

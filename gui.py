@@ -1,3 +1,24 @@
+"""
+Discord Piano Bot Translator - GUI Module
+
+This module provides a graphical user interface for a Discord bot that can
+join voice channels, record audio, transcribe speech, and translate it.
+It handles audio streaming, voice channel connections, and user interaction
+through PyQt5 controls.
+
+The GUI allows users to:
+- Connect to Discord voice channels
+- Stream audio to these channels
+- Record and process audio from users in the channel
+- Display transcribed and translated text
+- Toggle processing for specific users
+
+Dependencies:
+- PyQt5 for the user interface
+- discord.py for Discord integration
+- sound module for audio processing
+"""
+
 import os
 import sys
 import asyncio
@@ -34,6 +55,16 @@ else:
 
 
 class Dropdown(QComboBox):
+    """
+    Enhanced QComboBox that emits signals with both deselected and selected indices.
+
+    This class extends QComboBox to track selection changes and provide
+    additional functionality like hiding specific rows.
+
+    Signals:
+        changed(object, object): Emitted when selection changes, providing both
+                                 the previously selected and newly selected indices.
+    """
     changed = pyqtSignal(object, object)
 
     def __init__(self):
@@ -45,14 +76,28 @@ class Dropdown(QComboBox):
         self.currentIndexChanged.connect(self.changed_signal)
 
     def changed_signal(self, selected):
+        """
+        Signal handler for index changes in the dropdown.
+
+        Args:
+            selected (int): The index of the newly selected item
+        """
         self.changed.emit(self.deselected, selected)
         self.deselected = selected
 
-    def setRowHidden(self, idx, hidden):
+    def set_row_hidden(self, idx, hidden):
+        """ Hide or show a specific row in the dropdown."""
         self.view().setRowHidden(idx, hidden)
 
 
 class SVGButton(QPushButton):
+    """
+    Button with integrated SVG loading indicator.
+
+    This button displays an SVG animation when disabled, providing
+    visual feedback for background operations.
+    """
+
     def __init__(self, text=None):
         super().__init__(text)
         self.layout = QHBoxLayout()
@@ -62,18 +107,37 @@ class SVGButton(QPushButton):
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.addWidget(self.svg)
 
+    # pylint: disable=invalid-name
     def setEnabled(self, enabled):
-        """Override setEnabled to control SVG visibility based on enabled state."""
+        """Override setEnabled to control SVG visibility based on enabled state.
+
+        This method overrides Qt's setEnabled method and must use camelCase.
+        """
         super().setEnabled(enabled)
         self.svg.setVisible(not enabled)
 
-    def setSvgVisible(self, visible):
+    def set_svg_visible(self, visible):
         """Set the visibility of the SVG widget directly."""
         self.svg.setVisible(visible)
 
 
 # pylint: disable=too-many-instance-attributes
 class Connection:
+    """
+    Manages a connection to a Discord voice channel.
+
+    This class handles:
+    - Device selection
+    - Server (guild) selection
+    - Channel selection
+    - Audio streaming
+    - Voice channel connection/disconnection
+    - Mute/unmute functionality
+    - Recording and processing audio
+
+    It provides the UI elements needed to control these features.
+    """
+
     def __init__(self, layer, parent):
         self.stream = sound.PCMStream()
         self.parent = parent
@@ -122,6 +186,15 @@ class Connection:
 
     @staticmethod
     def resize_combobox(combobox):
+        """
+        Resize a combobox to fit its contents.
+
+        Calculates the width needed to display all items in the combobox
+        and sets the minimum width accordingly.
+
+        Args:
+            combobox (QComboBox): The combobox to resize.
+        """
         font = combobox.property("font")
         metrics = QFontMetrics(font)
         min_width = 0
@@ -132,7 +205,8 @@ class Connection:
 
         combobox.setMinimumWidth(min_width + 50)
 
-    def setEnabled(self, enabled):
+    def set_enabled(self, enabled):
+        """Enable or disable all connection UI elements."""
         self.devices.setEnabled(enabled)
         self.servers.setEnabled(enabled)
         self.channels.setEnabled(enabled)
@@ -140,10 +214,22 @@ class Connection:
         self.mute.setText("Mute" if enabled else "")
 
     def set_servers(self, guilds):
+        """
+        Populate the servers dropdown with Discord guilds (servers).
+
+        Args:
+            guilds (list): List of Discord Guild objects to add to the dropdown.
+        """
         for guild in guilds:
             self.servers.addItem(guild.name, guild)
 
     def change_device(self):
+        """
+        Handle audio device changes.
+
+        Updates the audio stream to use the newly selected audio device
+        and restarts audio playback if it was already active.
+        """
         try:
             selection = self.devices.currentData()
             self.mute.setText("Mute")
@@ -161,6 +247,16 @@ class Connection:
             logging.exception("Error on change_device: %s", e)
 
     async def change_server(self, deselcted, selected):
+        """
+        Handle server selection changes.
+
+        Updates the channels dropdown to show voice channels available
+        in the selected server.
+
+        Args:
+            deselcted (int): Index of the previously selected server in the dropdown.
+            selected (int): Index of the newly selected server in the dropdown.
+        """
         try:
             selection = self.servers.itemData(selected)
 
@@ -174,14 +270,21 @@ class Connection:
 
             Connection.resize_combobox(self.channels)
 
-        except Exception:
-            logging.exception("Error on change_server")
+        except (discord.errors.HTTPException, AttributeError, ValueError) as e:
+            logging.exception("Error on change_server: %s", e)
 
     async def change_channel(self):
+        """
+        Handle voice channel selection changes.
+
+        Connects to the selected voice channel or disconnects if "None" is selected.
+        Updates the UI to reflect the connection status and populates the list of
+        users in the channel.
+        """
         try:
             selection = self.channels.currentData()
             self.mute.setText("Mute")
-            self.setEnabled(False)
+            self.set_enabled(False)
 
             if selection is not None:
                 not_connected = (
@@ -221,9 +324,19 @@ class Connection:
             logging.exception("Error on change_channel: %s", e)
 
         finally:
-            self.setEnabled(True)
+            self.set_enabled(True)
 
     async def handle_bot_movement(self, new_channel):
+        """
+        Handle events when the bot is moved between voice channels.
+
+        Updates the connected users list and voice client reference
+        when the bot is moved to a new channel or disconnected.
+
+        Args:
+            new_channel (discord.VoiceChannel or None): The channel the bot was moved to,
+                                                       or None if the bot was disconnected.
+        """
         try:
             if new_channel is not None:
                 self.parent.vc = self.voice  # Update the voice client
@@ -232,14 +345,20 @@ class Connection:
                 ]
                 print(f"Bot moved to a new channel: {new_channel.name}")
                 print(
-                    f"Updated connected_users list for new channel: {[user.display_name for user in self.parent.connected_users]}")
+                    "Updated connected_users list for new channel:"
+                    f"{[user.display_name for user in self.parent.connected_users]}")
             else:
                 self.parent.connected_users = []
                 print("Bot is no longer in a voice channel. Connected users cleared.")
-        except Exception:
-            logging.exception("Error handling bot movement")
+        except (discord.errors.HTTPException, AttributeError) as e:
+            logging.exception("Error handling bot movement: %s", e)
 
     def toggle_mute(self):
+        """
+        Toggle audio muting for the voice client.
+
+        Pauses or resumes audio playback and updates the mute button text accordingly.
+        """
         try:
             if self.voice is not None:
                 if self.voice.is_playing():
@@ -256,6 +375,7 @@ class Connection:
             logging.exception("Runtime error in toggle_mute: %s", e)
 
     def toggle_listen(self):
+        """ Toggle listening for user input."""
         try:
             if self.parent.is_listening:
                 # Stop listening
@@ -297,13 +417,13 @@ class Connection:
                             None,
                         )
                         print("Started recording audio.")
-                    except Exception as e:
+                    except (discord.errors.ClientException, RuntimeError) as e:
                         print(f"Error starting recording: {e}")
                         # Reset state
                         self.parent.is_listening = False
                         self.listen.setText("Listen")
                         self.listen.setStyleSheet("")
-        except Exception as e:
+        except (discord.errors.ClientException, RuntimeError, AttributeError) as e:
             print(f"Error in toggle_listen: {e}")
 
     def clear_text_boxes(self):
@@ -313,27 +433,30 @@ class Connection:
 
 
 class TitleBar(QFrame):
+    """
+    Custom window title bar implementation.
+
+    Provides a custom window title bar with minimize and close buttons,
+    replacing the default window decorations.
+    """
+
     def __init__(self, parent):
         super().__init__()
         self.setObjectName("titlebar")
         self.parent = parent
         self.bot = parent.bot
 
-        # layout
+        # layout and window title
         layout = QHBoxLayout()
         layout.setContentsMargins(0, 0, 0, 10)
         self.setLayout(layout)
+        title = QLabel("Piano Translator Bot")
 
-        # window title
-        title = QLabel("Discord Audio Pipe")
-
-        # buttons
+        # buttons and add widgets
         minimize_button = QPushButton("—")
         minimize_button.setObjectName("minimize")
         close_button = QPushButton("✕")
         close_button.setObjectName("close")
-
-        # add widgets
         layout.addWidget(title)
         layout.addStretch()
         layout.addWidget(minimize_button)
@@ -345,20 +468,21 @@ class TitleBar(QFrame):
             lambda: asyncio.ensure_future(self.close()))
 
     async def close(self):
+        """Handle the close event for the window."""
         # First, check if listening is active and stop it
         if self.parent.is_listening:
             try:
                 print("Stopping recording before closing...")
                 self.parent.force_stop_listening()
                 await asyncio.sleep(0.5)
-            except Exception as e:
+            except (discord.errors.ClientException, RuntimeError, asyncio.CancelledError) as e:
                 print(f"Error stopping recording during close: {e}")
 
         # Then proceed with the normal closing routine
         for voice in self.bot.voice_clients:
             try:
                 await voice.disconnect()
-            except Exception:
+            except (discord.errors.ClientException, asyncio.CancelledError):
                 pass
 
         # Use the proper method to close the bot instead of accessing protected members
@@ -366,11 +490,27 @@ class TitleBar(QFrame):
         self.parent.close()
 
     def minimize(self):
+        """Minimize the window."""
         self.parent.showMinimized()
 
 
 # pylint: disable=too-many-instance-attributes
 class GUI(QMainWindow):
+    """
+    Main application window for the Discord Piano Bot Translator.
+
+    This class provides the complete user interface for the application, including:
+    - Device, server, and channel selection
+    - Text display areas for transcriptions and translations
+    - User toggle controls
+    - Emergency stop functionality
+    - Window management
+
+    It handles audio processing, voice channel interactions, and coordinates
+    between different components of the application.
+    """
+    # pylint: disable=too-many-statements
+
     def __init__(self, app, bot):
         super().__init__()
         QDir.setCurrent(bundle_dir)
@@ -497,47 +637,108 @@ class GUI(QMainWindow):
         self.last_transcription_speaker = ""
         self.last_translation_speaker = ""
 
+    # pylint: disable=invalid-name
     def mousePressEvent(self, event):
+        """Handle mouse press events for window dragging.
+
+        Overrides Qt's mousePressEvent method.
+        """
         if event.button() == Qt.LeftButton:
             self.position = event.pos()
             event.accept()
 
+    # pylint: disable=invalid-name
     def mouseMoveEvent(self, event):
+        """Handle mouse move events for window dragging.
+
+        Overrides Qt's mouseMoveEvent method.
+        """
         if self.position is not None and event.buttons() == Qt.LeftButton:
             self.move(self.pos() + event.pos() - self.position)
             event.accept()
 
+    # pylint: disable=invalid-name
     def mouseReleaseEvent(self, event):
+        """Handle mouse release events for window dragging.
+
+        Overrides Qt's mouseReleaseEvent method.
+        """
         self.position = None
         event.accept()
 
     def exclude(self, deselected, selected):
+        """
+        Manage visibility of servers across multiple connections.
+
+        When a server is selected in one connection dropdown, it is hidden in all other 
+        connection dropdowns to prevent the same server from being used in multiple connections.
+
+        Args:
+            deselected (int): Index of the previously selected server.
+            selected (int): Index of the newly selected server.
+        """
         self.connected_servers.add(selected)
 
         if deselected is not None:
             self.connected_servers.remove(deselected)
 
         for connection in self.connections:
-            connection.servers.setRowHidden(selected, True)
+            connection.servers.set_row_hidden(selected, True)
 
             if deselected is not None:
-                connection.servers.setRowHidden(deselected, False)
+                connection.servers.set_row_hidden(deselected, False)
 
-    async def run_Qt(self, interval=0.01):
+    async def run_qt(self, interval=0.01):
+        """
+        Run the Qt event loop within an asyncio context.
+
+        This function allows the Qt GUI to remain responsive while running
+        alongside asyncio coroutines.
+
+        Args:
+            interval (float): Time in seconds between processing Qt events.
+        """
         while True:
             QCoreApplication.processEvents(
                 QEventLoop.AllEvents, int(interval * 1000))
             await asyncio.sleep(interval)
 
     async def ready(self):
+        """
+        Initialize the application once the Discord bot is ready.
+
+        This method is called when the bot has successfully connected to Discord
+        and is ready to interact with the API. It populates the server list and
+        enables the UI controls.
+        """
         await self.bot.wait_until_ready()
         self.info.setText(f"Logged in as: {self.bot.user.name}")
         self.connections[0].set_servers(self.bot.guilds)
         Connection.resize_combobox(self.connections[0].servers)
         self.setEnabled(True)
 
+    def _format_text(self, current_text, current_speaker, last_speaker, new_text):
+        """Helper method to format text consistently with fewer branches."""
+        if current_text and current_speaker == last_speaker:
+            # Same speaker, append to the last line with punctuation handling
+            lines = current_text.split("\n")
+            last_line = lines[-1]
+            # Check for punctuation
+            ends_with_punctuation = any(last_line.endswith(p)
+                                        for p in ['.', '!', '?'])
+
+            # Format based on punctuation
+            if ends_with_punctuation:
+                return f"{current_text} {new_text}"
+            return f"{current_text}. {new_text}"
+
+        # New speaker or empty current text
+        if current_text:
+            return f"{current_text}\n{current_speaker}: {new_text}"
+        return f"{current_speaker}: {new_text}"
+
     def update_text_display(self, transcribed_text, translated_text):
-        """Append new transcriptions and translations to the text displays with more natural formatting."""
+        """Append new transcriptions and translations to the text displays"""
         # Parse out the speaker from the incoming texts
         try:
             current_speaker_transcribed = transcribed_text.split(":", 1)[
@@ -558,58 +759,28 @@ class GUI(QMainWindow):
         current_transcribed = self.transcribed_display.toPlainText()
         current_translated = self.translated_display.toPlainText()
 
-        # Process transcribed text
-        if current_transcribed and current_speaker_transcribed == self.last_transcription_speaker:
-            # Same speaker, append to the last line with punctuation handling
-            lines = current_transcribed.split("\n")
-            last_line = lines[-1]
-            if last_line.endswith('.') or last_line.endswith('!') or last_line.endswith('?'):
-                # If last line ends with proper punctuation, just add space
-                new_transcribed = f"{current_transcribed} {current_text_transcribed}"
-            else:
-                # Otherwise add a period and space for readability
-                new_transcribed = f"{current_transcribed}. {current_text_transcribed}"
-        else:
-            # New speaker, add a new line
-            if current_transcribed:
-                new_transcribed = f"{current_transcribed}\n{current_speaker_transcribed}: {current_text_transcribed}"
-            else:
-                new_transcribed = f"{current_speaker_transcribed}: {current_text_transcribed}"
+        # Process text using helper method
+        new_transcribed = self._format_text(
+            current_transcribed,
+            current_speaker_transcribed,
+            self.last_transcription_speaker,
+            current_text_transcribed
+        )
 
-        # Process translated text
-        if current_translated and current_speaker_translated == self.last_translation_speaker:
-            # Same speaker, append to the last line with punctuation handling
-            lines = current_translated.split("\n")
-            last_line = lines[-1]
-            if last_line.endswith('.') or last_line.endswith('!') or last_line.endswith('?'):
-                # If last line ends with proper punctuation, just add space
-                new_translated = f"{current_translated} {current_text_translated}"
-            else:
-                # Otherwise add a period and space for readability
-                new_translated = f"{current_translated}. {current_text_translated}"
-        else:
-            # New speaker, add a new line
-            if current_translated:
-                new_translated = f"{current_translated}\n{current_speaker_translated}: {current_text_translated}"
-            else:
-                new_translated = f"{current_speaker_translated}: {current_text_translated}"
+        new_translated = self._format_text(
+            current_translated,
+            current_speaker_translated,
+            self.last_translation_speaker,
+            current_text_translated
+        )
 
         # Update last speaker tracking
         self.last_transcription_speaker = current_speaker_transcribed
         self.last_translation_speaker = current_speaker_translated
 
-        # Limit text size (keep last 30 lines)
-        transcribed_lines = new_transcribed.split("\n")
-        translated_lines = new_translated.split("\n")
-
-        if len(transcribed_lines) > 30:
-            transcribed_lines = transcribed_lines[-30:]
-        if len(translated_lines) > 30:
-            translated_lines = translated_lines[-30:]
-
         # Update display
-        self.transcribed_display.setPlainText("\n".join(transcribed_lines))
-        self.translated_display.setPlainText("\n".join(translated_lines))
+        self.transcribed_display.setPlainText(new_transcribed)
+        self.translated_display.setPlainText(new_translated)
 
         # Scroll to the bottom
         self.transcribed_display.verticalScrollBar().setValue(
@@ -617,9 +788,10 @@ class GUI(QMainWindow):
         self.translated_display.verticalScrollBar().setValue(
             self.translated_display.verticalScrollBar().maximum())
 
-    async def process_audio_callback(self):
+    async def process_audio_callback(self, sink, data):  # pylint: disable=unused-argument
         """
         Callback function to process audio data.
+        This function must maintain this signature to work with discord.py's voice client.
         """
         print("Finished processing audio.")
 
@@ -649,10 +821,11 @@ class GUI(QMainWindow):
                 # Show confirmation to user
                 QMessageBox.information(
                     self, "Emergency Stop",
-                    "Recording has been force-stopped. You may need to restart the application if issues persist."
+                    "Recording has been force-stopped. "
+                    "You may need to restart the application if issues persist."
                 )
 
-            except Exception as e:
+            except (discord.errors.ClientException, RuntimeError, AttributeError) as e:
                 print(f"Error during emergency stop: {e}")
                 QMessageBox.critical(
                     self, "Error",
@@ -660,7 +833,12 @@ class GUI(QMainWindow):
                 )
 
     def cleanup_resources(self):
-        """Clean up resources when application is closing."""
+        """
+        Clean up resources when the application is closing.
+
+        Stops any active recordings, cleans up sinks, and disconnects
+        from all voice clients.
+        """
         print("Cleaning up resources...")
 
         if self.is_listening and self.vc:
@@ -683,7 +861,7 @@ class GUI(QMainWindow):
                         # Give worker threads a chance to terminate
                         if hasattr(connection.sink, "worker_thread"):
                             connection.sink.worker_thread.join(timeout=1.0)
-            except Exception as e:
+            except (discord.errors.ClientException, RuntimeError, AttributeError) as e:
                 print(f"Error during cleanup: {e}")
 
         # Make sure all voice clients are disconnected
@@ -691,18 +869,25 @@ class GUI(QMainWindow):
             try:
                 asyncio.run_coroutine_threadsafe(
                     voice.disconnect(), self.bot.loop)
-            except Exception as e:
+            except (discord.errors.ClientException, RuntimeError) as e:
                 print(f"Error disconnecting voice client: {e}")
 
+    # pylint: disable=invalid-name
     def closeEvent(self, event):
-        """Handle window close event properly."""
+        """
+        Ensures that all resources are cleaned up and recordings are stopped
+        before the application is closed.
+
+        Args:
+            event (QCloseEvent): The close event triggered by the user.
+        """
         print("Window close event detected")
 
         # First stop any active recording
         if self.is_listening and self.vc:
             try:
                 self.force_stop_listening()
-            except Exception as e:
+            except (discord.errors.ClientException, RuntimeError, AttributeError) as e:
                 print(f"Error stopping recording during close: {e}")
 
         # Clean up resources
@@ -712,7 +897,15 @@ class GUI(QMainWindow):
         event.accept()
 
     def update_connected_users(self, users):
-        """Update the user toggle UI with current connected users."""
+        """
+        Update the UI to display connected users and their toggle controls.
+
+        Creates toggle buttons for each connected user to enable/disable
+        processing of their audio.
+
+        Args:
+            users (list): List of Discord Member objects
+        """
         # Create a brand new layout
         self.user_toggle_layout = QVBoxLayout()
         self.user_toggle_layout.setContentsMargins(0, 0, 0, 0)
@@ -785,7 +978,13 @@ class GUI(QMainWindow):
             self.user_toggle_layout.addWidget(user_frame)
 
     def toggle_user_processing(self, button):
-        """Toggle audio processing for specific user."""
+        """
+        Toggle audio processing for a specific user.
+
+        Args:
+            button (QPushButton): The toggle button that was clicked,
+                                 containing the user_id attribute
+        """
         user_id = button.user_id
         enabled = button.isChecked()
         self.user_processing_enabled[user_id] = enabled

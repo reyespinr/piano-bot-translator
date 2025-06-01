@@ -40,7 +40,7 @@ class VoiceTranslator:
         except Exception as e:
             logger.error(f"Error verifying model loading capability: {str(e)}")
             return False
-    
+
     def setup_voice_receiver(self, voice_client):
         """Set up the voice receiver for a Discord voice client"""
         if not self.model_loaded:
@@ -66,14 +66,15 @@ class VoiceTranslator:
             self.sink.translation_callback = self.process_audio_callback
 
             # Set parent reference to access user_processing_enabled dictionary
-            if hasattr(self, 'user_processing_enabled'):                # Create a simple object to hold the user_processing_enabled dictionary
+            # Create a simple object to hold the user_processing_enabled dictionary
+            if hasattr(self, 'user_processing_enabled'):
                 self.sink.parent = type('obj', (object,), {})
-                
+
                 # CRITICAL FIX: Create a fresh copy of the dictionary to prevent reference issues
                 processing_settings = {}
                 for k, v in self.user_processing_enabled.items():
                     processing_settings[str(k)] = bool(v)
-                
+
                 self.sink.parent.user_processing_enabled = processing_settings
                 logger.debug(
                     f"Active user settings: {', '.join([f'{k}={v}' for k, v in processing_settings.items()])}")

@@ -19,6 +19,7 @@ import io
 import wave
 import queue
 import threading
+import random  # Add this import for random logging
 from dataclasses import dataclass
 from queue import Queue
 import numpy as np
@@ -130,6 +131,9 @@ class RealTimeWaveSink(WaveSink):
         # Initialize the parent class reference
         self.parent = None
 
+        # Initialize the translation callback to None - THIS IS THE KEY FIX
+        self.translation_callback = None
+
         # Use composition to organize related attributes
         self.config = AudioConfig(
             pause_threshold=pause_threshold,
@@ -143,6 +147,9 @@ class RealTimeWaveSink(WaveSink):
 
         # User state is stored in dictionaries mapping user IDs to UserState objects
         self.users = {}
+
+        # Add tracking for last log time to prevent log spam
+        self.last_block_log_time = {}
 
         # Initialize worker threads
         self._start_worker_threads()
@@ -207,16 +214,39 @@ class RealTimeWaveSink(WaveSink):
         try:
             current_time = time.time()
 
-            # Check if user is enabled for processing
+            # Check if user is enabled for processing - CRITICAL LOGIC
             if (hasattr(self, 'parent') and
                     self.parent and
                     hasattr(self.parent, 'user_processing_enabled')):
-                if (int(user) in self.parent.user_processing_enabled and
-                        not self.parent.user_processing_enabled[int(user)]):
-                    # User is disabled, just write to main buffer and skip processing
+
+                # IMPORTANT: Force user ID to string type for consistency
+                user_id = str(user)
+
+                # COMPLETELY REDESIGNED: Check the actual dictionary at runtime for each packet
+                if user_id in self.parent.user_processing_enabled:
+                    # Get the CURRENT value directly from the dictionary (not a cached value)
+                    enabled = bool(
+                        self.parent.user_processing_enabled[user_id])
+
+                    if not enabled:
+                        # Only log once per session
+                        if user_id not in self.last_block_log_time:
+                            print(f"User {user_id} audio processing disabled")
+                            self.last_block_log_time[user_id] = current_time
+
+                        # CRITICAL: Just write to buffer and IMMEDIATELY return
+                        super().write(data, user)
+                        return
+
+                else:
+                    # Don't automatically enable users - require explicit setting
+                    print(
+                        f"New user {user_id} detected, requiring manual enable")
+                    self.parent.user_processing_enabled[user_id] = False
                     super().write(data, user)
                     return
 
+        # Continue with normal audio processing for enabled users
             # Update last activity time when any audio is processed
             self.session.last_activity_time = current_time
 
@@ -353,9 +383,9 @@ class RealTimeWaveSink(WaveSink):
 
         while self.workers.running:
             try:
-                # Get item from queue with timeout
+                # Get item from queue with timeout (no debug message for waiting)
                 audio_file, user = self.workers.queue.get(timeout=1)
-                print(f"{thread_name} processing audio for user {user}")
+                print(f"Processing audio for user {user}")
 
                 # Process the transcription
                 asyncio.run_coroutine_threadsafe(
@@ -368,10 +398,10 @@ class RealTimeWaveSink(WaveSink):
                 self.workers.queue.task_done()
 
             except queue.Empty:
-                # No items in queue, just continue waiting
+                # No debug message for empty queue
                 pass
-            except (asyncio.InvalidStateError, RuntimeError, ValueError, TypeError, OSError) as e:
-                print(f"Error in {thread_name}: {e}")
+            except Exception as e:
+                print(f"Error in transcription worker: {e}")
 
         print(f"{thread_name} stopped")
 
@@ -497,78 +527,161 @@ class RealTimeWaveSink(WaveSink):
                 print(f"Audio file {audio_file} does not exist, skipping.")
                 return
 
-            # Get transcription and detected language
-            transcribed_text, detected_language = await utils.transcribe(audio_file)
+            transcribed_text = None
+            detected_language = None
 
-            # Skip processing if transcription was empty (failed confidence check)
-            if not transcribed_text:
-                print(
-                    f"Empty transcription for user {user}, skipping processing.")
-                self._cleanup_audio_file(audio_file)
+            try:
+                # Get transcription and detected language
+                transcribed_text, detected_language = await utils.transcribe(audio_file)
+
+                # Skip processing if transcription was empty (failed confidence check)
+                if not transcribed_text:
+                    print(
+                        f"Empty transcription for user {user}, skipping processing.")
+                    # Must delete file right after transcription
+                    await self._force_delete_file(audio_file)
+                    return
+            except Exception as e:
+                print(f"Error during transcription: {e}")
+                # Must delete file even if transcription fails
+                await self._force_delete_file(audio_file)
                 return
 
-            # Determine if translation is needed
-            needs_translation = await utils.should_translate(transcribed_text, detected_language)
+            try:
+                # Determine if translation is needed
+                needs_translation = await utils.should_translate(transcribed_text, detected_language)
 
-            if needs_translation:
-                translated_text = await utils.translate(transcribed_text)
-                print(f"Translated from {detected_language} to English")
-            else:
-                # Skip translation for English or empty text
-                translated_text = transcribed_text
-                print(
-                    f"Skipped translation - detected language: {detected_language}")
+                if needs_translation:
+                    translated_text = await utils.translate(transcribed_text)
+                    print(f"Translated from {detected_language} to English")
+                else:
+                    # Skip translation for English or empty text
+                    translated_text = transcribed_text
+                    print(f"Processing speech in {detected_language}")
 
-            # Debug output
-            print(f"Transcription for user {user}: {transcribed_text}")
+                # Clean log output
+                print(f"Transcription: {transcribed_text}")
+                if needs_translation:
+                    print(f"Translation: {translated_text}")
 
-            # Update the GUI
-            await self._update_gui(user, transcribed_text, translated_text)
+                # Try updating GUI if available
+                try:
+                    await self._update_gui(user, transcribed_text, translated_text)
+                except Exception as e:
+                    print(f"GUI update failed: {e}")
+                    # Even if GUI update fails, try the translation callback directly
+                    if hasattr(self, 'translation_callback') and self.translation_callback:
+                        try:
+                            await self.translation_callback(user, transcribed_text, message_type="transcription")
+                            if needs_translation and translated_text != transcribed_text:
+                                await self.translation_callback(user, translated_text, message_type="translation")
+                            print("Transcription sent via callback")
+                        except Exception as cb_error:
+                            print(
+                                f"Error using translation callback: {cb_error}")
+            finally:
+                # CRITICAL: Must delete the file after we're done with it
+                # This needs to be in the finally block to ensure it runs
+                await self._force_delete_file(audio_file)
 
-            # Clean up temporary file
-            self._cleanup_audio_file(audio_file)
-
-        except (FileNotFoundError, IOError, ValueError, RuntimeError, asyncio.TimeoutError) as e:
+        except Exception as e:
             print(
                 f"Error during transcription/translation for user {user}: {e}")
-            self._cleanup_audio_file(audio_file)
+            # One final attempt to delete the file
+            await self._force_delete_file(audio_file)
+
+    async def _force_delete_file(self, file_path):
+        """Forcefully delete a file with multiple retries and GC."""
+        if not file_path or not os.path.exists(file_path):
+            return
+
+        # Try to delete the file with multiple retries
+        for attempt in range(3):
+            try:
+                # Try to force Python to release any file handles
+                import gc
+                gc.collect()
+
+                # Try to delete
+                os.remove(file_path)
+                print(f"🗑️ Deleted file: {os.path.basename(file_path)}")
+
+                # Verify deletion
+                if not os.path.exists(file_path):
+                    return True
+                print(
+                    f"⚠️ File still exists after deletion attempt: {file_path}")
+            except (PermissionError, OSError) as e:
+                print(f"🔄 Deletion attempt {attempt+1} failed: {e}")
+                await asyncio.sleep(0.5)  # Wait before retry
+
+        # Last resort: try with Windows-specific commands on Windows
+        if os.name == 'nt':
+            try:
+                import subprocess
+                subprocess.run(f'del /F "{file_path}"',
+                               shell=True, check=False)
+                print(
+                    f"🗑️ Attempted deletion with Windows command: {file_path}")
+            except Exception as e:
+                print(f"❌ Windows command deletion failed: {e}")
+
+        print(f"⚠️ Failed to delete file after multiple attempts: {file_path}")
+        return False
+
+    def _cleanup_audio_file(self, audio_file):
+        """
+        Legacy synchronous file cleanup method - 
+        For backward compatibility only.
+        Use _force_delete_file instead.
+        """
+        # Run the async delete in a non-blocking way
+        if audio_file and os.path.exists(audio_file):
+            # Create a task to delete the file
+            asyncio.create_task(self._force_delete_file(audio_file))
 
     async def _update_gui(self, user, transcribed_text, translated_text):
         """Update the GUI with transcription and translation results."""
         try:
-            if (hasattr(self, 'parent') and self.parent and
-                    hasattr(self.parent, 'vc') and self.parent.vc):
-                # Get the user's display name
-                guild = self.parent.vc.guild
-                member = guild.get_member(int(user))
-                user_name = member.display_name if member else f"User {user}"
-
-                # Format display text
-                transcription = f"{user_name}: {transcribed_text}" if transcribed_text else ""
-                translation = f"{user_name}: {translated_text}" if translated_text else ""
-
-                if transcription and translation:
-                    # Update the GUI
+            # Try to update the GUI through parent object
+            if hasattr(self, 'parent') and self.parent:
+                # Check if the parent has a update_text_display method
+                if hasattr(self.parent, 'update_text_display'):
                     self.parent.update_text_display(
-                        transcription, translation)
-            else:
-                print("Could not update GUI: Missing voice client or parent reference")
-        except (AttributeError, TypeError, ValueError) as e:
-            print(f"Error updating GUI for user {user}: {e}")
+                        transcribed_text, translated_text)
+                    return
 
-    def _cleanup_audio_file(self, audio_file):
-        """Clean up temporary audio file."""
-        try:
-            if os.path.exists(audio_file):
-                os.remove(audio_file)
-        except (PermissionError, OSError, IOError) as e:
-            print(f"Error removing audio file {audio_file}: {e}")
+            # If we get here, try the translation callback
+            if hasattr(self, 'translation_callback') and self.translation_callback:
+                try:
+                    # Send transcription first
+                    await self.translation_callback(user, transcribed_text, message_type="transcription")
+
+                    # Then send translation if different
+                    if transcribed_text != translated_text:
+                        await self.translation_callback(user, translated_text, message_type="translation")
+                    else:
+                        await self.translation_callback(user, translated_text, message_type="translation")
+
+                    return
+                except TypeError as e:
+                    # Try without message_type parameter as a fallback
+                    print(
+                        f"Error with message_type parameter: {e}, trying without it")
+                    await self.translation_callback(user, transcribed_text)
+                    if transcribed_text != translated_text:
+                        await self.translation_callback(user, translated_text)
+                    return
+
+        except (AttributeError, TypeError, ValueError) as e:
+            print(f"Error updating display for user {user}: {e}")
+            import traceback
+            print(f"TEXT-FLOW: Traceback: {traceback.format_exc()}")
 
     def _check_inactive_speakers(self):
         """Periodically check for users who have stopped speaking but haven't been processed."""
         try:
             current_time = time.time()
-
             # Check each user
             for user, user_state in list(self.users.items()):
                 if (user_state.is_speaking and
@@ -596,10 +709,40 @@ class RealTimeWaveSink(WaveSink):
 
     def cleanup(self):
         """Clean up resources when the sink is no longer needed."""
+        print("Starting sink cleanup process...")
+
+        # Set running flag to False
+        print("Setting worker running flag to False")
         self.workers.running = False
+
+        # Cancel timer if it exists
         if self.workers.timer:
+            print("Canceling worker timer")
             self.workers.timer.cancel()
 
-        # Worker threads are daemon threads and will terminate when the program exits
+        # Add a small delay to let threads terminate naturally
+        print("Waiting for threads to terminate naturally")
+        time.sleep(0.2)
+
+        # Clear the queue to unblock any waiting threads
+        try:
+            print(
+                f"Clearing queue (current size: {self.workers.queue.qsize()})")
+            while not self.workers.queue.empty():
+                try:
+                    item = self.workers.queue.get_nowait()
+                    print(f"Removed item from queue: {item[0]}")
+                    self.workers.queue.task_done()
+                except queue.Empty:
+                    print("Queue empty exception while clearing")
+                    break
+        except (ValueError, RuntimeError) as e:
+            print(f"Error clearing queue: {e}")
+
         print(
             f"Cleaning up sink resources - {self.workers.num_workers} workers stopped")
+        # Print thread status
+        for i, worker in enumerate(self.workers.workers):
+            print(f"Worker {i} alive: {worker.is_alive()}")
+
+        # Worker threads are daemon threads and will terminate when the program exits

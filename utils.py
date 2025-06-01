@@ -22,20 +22,26 @@ import numpy as np
 import requests
 import stable_whisper
 
-# Preload the stable-ts model globally
-# Uncomment the model you want to use
-MODEL_NAME = "large-v3-turbo"  # Use "large-v3-turbo" for best performance
-# MODEL_NAME = "base"  # Use "base" for faster inference
-# MODEL_NAME = "large-v3"  # Use "large-v3" for better accuracy but slower inference?
-print(f"Loading stable-ts {MODEL_NAME} model...")
-MODEL = stable_whisper.load_model(
-    MODEL_NAME, device="cuda")  # Use "cuda" for GPU
-print("stable-ts model loaded successfully!")
+# Model reference (will be loaded on demand, not at import time)
+MODEL = None
+# MODEL_NAME = "large-v3-turbo"
+MODEL_NAME = "base"
+
 
 # Common hallucinations to filter out
 COMMON_HALLUCINATIONS = {
     "thank you", "thanks", "thank", "um", "hmm"
 }
+
+
+def _load_model_if_needed():
+    """Lazy load the model only when needed - truly on-demand loading"""
+    global MODEL
+    if MODEL is None:
+        print(f"Loading stable-ts {MODEL_NAME} model...")
+        MODEL = stable_whisper.load_model(MODEL_NAME, device="cuda")
+        print("stable-ts model loaded successfully!")
+    return MODEL
 
 
 async def transcribe(audio_file_path):
@@ -56,8 +62,11 @@ async def transcribe(audio_file_path):
             - transcribed_text (str): The transcribed text or empty if filtered
             - detected_language (str): ISO language code detected by Whisper
     """
-    # Use the preloaded model for transcription with enhanced settings
-    result = MODEL.transcribe(
+    # Make sure model is loaded (true lazy loading)
+    model = _load_model_if_needed()
+
+    # Use the model for transcription with enhanced settings
+    result = model.transcribe(
         audio_file_path,
         vad=True,                  # Enable Voice Activity Detection
         vad_threshold=0.35,        # VAD confidence threshold
@@ -76,7 +85,7 @@ async def transcribe(audio_file_path):
     if detected_language == "is":  # "is" is the language code for Icelandic
         print("Detected Icelandic - likely Austrian German. Re-transcribing as German...")
         # Re-transcribe with German as forced language
-        result = MODEL.transcribe(
+        result = model.transcribe(
             audio_file_path,
             vad=True,
             vad_threshold=0.35,

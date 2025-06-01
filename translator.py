@@ -6,46 +6,45 @@ import time
 from typing import Callable, Dict, Any
 from custom_sink import RealTimeWaveSink
 import utils
+from logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class VoiceTranslator:
     def __init__(self, translation_callback: Callable[[str, str], None]):
         """
-        Initialize the voice translator
-
-        Args:
+        Initialize the voice translator        Args:
             translation_callback: Function to call when a translation is ready
                                  Arguments: (user_name, translated_text)
         """
         self.translation_callback = translation_callback
         self.active_voices = {}
         self.sink = None
-        self.is_listening = False
-
-        # No need to preload the model at initialization
+        self.is_listening = False        # No need to preload the model at initialization
         self.model_loaded = False
 
     async def load_models(self):
         """Verify model loading capabilities without actually loading the model"""
         try:
-            print("Loading translation models...")
+            logger.info("Loading translation models...")
             # We don't actually load the model here - it will be loaded
             # on-demand when transcribe is first called
             if hasattr(utils, "_load_model_if_needed"):
-                print("Model will be loaded on-demand when needed")
+                logger.info("Model will be loaded on-demand when needed")
                 self.model_loaded = True
                 return True
             else:
-                print("Warning: Model loading mechanism not found")
+                logger.warning("Model loading mechanism not found")
                 return False
         except Exception as e:
-            print(f"Error verifying model loading capability: {str(e)}")
+            logger.error(f"Error verifying model loading capability: {str(e)}")
             return False
-
+    
     def setup_voice_receiver(self, voice_client):
         """Set up the voice receiver for a Discord voice client"""
         if not self.model_loaded:
-            print("Warning: Models not loaded yet!")
+            logger.warning("Models not loaded yet!")
 
         # Store the voice client for later use
         self.active_voices[voice_client.guild.id] = voice_client
@@ -57,7 +56,7 @@ class VoiceTranslator:
 
         try:
             # Create sink for real-time audio processing
-            print("Creating voice processing sink...")
+            logger.info("Creating voice processing sink...")
             self.sink = RealTimeWaveSink(
                 pause_threshold=1.0,
                 event_loop=asyncio.get_event_loop()
@@ -67,17 +66,16 @@ class VoiceTranslator:
             self.sink.translation_callback = self.process_audio_callback
 
             # Set parent reference to access user_processing_enabled dictionary
-            if hasattr(self, 'user_processing_enabled'):
-                # Create a simple object to hold the user_processing_enabled dictionary
+            if hasattr(self, 'user_processing_enabled'):                # Create a simple object to hold the user_processing_enabled dictionary
                 self.sink.parent = type('obj', (object,), {})
-
+                
                 # CRITICAL FIX: Create a fresh copy of the dictionary to prevent reference issues
                 processing_settings = {}
                 for k, v in self.user_processing_enabled.items():
                     processing_settings[str(k)] = bool(v)
-
+                
                 self.sink.parent.user_processing_enabled = processing_settings
-                print(
+                logger.debug(
                     f"Active user settings: {', '.join([f'{k}={v}' for k, v in processing_settings.items()])}")
             elif hasattr(voice_client, 'guild') and voice_client.guild:
                 # Try to import from server module as a fallback

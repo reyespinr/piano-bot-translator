@@ -12,6 +12,10 @@ from contextlib import asynccontextmanager
 import toggle_fix  # This applies the monkey patch
 from translator import VoiceTranslator
 import utils  # Import utils for create_dummy_audio_file and transcribe
+from logging_config import get_logger
+
+# Initialize logger for this module
+logger = get_logger(__name__)
 
 # Define lifespan context manager for FastAPI
 
@@ -19,37 +23,35 @@ import utils  # Import utils for create_dummy_audio_file and transcribe
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    global translator, bot_ready
-
-    # Clean up any stray WAV files from previous runs
+    global translator, bot_ready    # Clean up any stray WAV files from previous runs
     try:
         from cleanup import clean_temp_files
         clean_temp_files()
     except Exception as e:
-        print(f"Warning: Could not run cleanup utility: {e}")
+        logger.warning(f"Could not run cleanup utility: {e}")
 
     # Initialize the translator
     translator = VoiceTranslator(broadcast_translation)
     await translator.load_models()
 
     # Force model loading by performing a small transcription
-    print("Forcing model loading and warming up pipeline...")
+    logger.info("Initializing transcription pipeline...")
     # Create a dummy audio file and transcribe it to load the model
     temp_file = utils.create_dummy_audio_file()
     await utils.transcribe(temp_file)
     os.remove(temp_file)
-    print("Model loaded and pipeline ready for use")
+    logger.info("Transcription pipeline ready")
 
     # Get token from token.txt file
     try:
         with open("token.txt", "r") as f:
             bot_token = f.read().strip()
         if not bot_token:
-            print("Warning: token.txt file is empty")
+            logger.warning("token.txt file is empty")
             yield
             return
     except FileNotFoundError:
-        print("Warning: token.txt file not found")
+        logger.warning("token.txt file not found")
         yield
         return
 
@@ -59,16 +61,14 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
-    global is_listening
-
-    # Stop listening if active
+    global is_listening    # Stop listening if active
     if is_listening and connected_channel:
         guild_id = connected_channel.guild.id
         if guild_id in voice_clients:
             try:
                 await translator.stop_listening(voice_clients[guild_id])
             except Exception as e:
-                print(f"Error stopping listening during shutdown: {str(e)}")
+                logger.error(f"Error stopping listening during shutdown: {e}")
 
     # Clean up translator resources
     if translator:
@@ -96,7 +96,7 @@ bot = discord.Client(intents=intents)  # Change from Bot to Client
 async def on_ready():
     global bot_ready
     bot_ready = True
-    print(f"Bot is ready as {bot.user}")
+    logger.info(f"Bot is ready as {bot.user}")
 
     # Notify all connected clients that the bot is ready
     for connection in active_connections:
@@ -206,14 +206,13 @@ async def handle_command(data, websocket):
 
         # Update the user processing state
         user_processing_enabled[user_id] = enabled
-        print(f"USER-TOGGLE: User {user_id} processing set to {enabled}")
+        logger.debug(f"User {user_id} processing set to {enabled}")
 
         # Completely restart listening if active - the only solution that works reliably
         if is_listening and connected_channel:
             guild_id = connected_channel.guild.id
             if guild_id in voice_clients:
-                print(
-                    f"TOGGLE-RESTART: Completely restarting listener for user {user_id}")
+                logger.debug(f"Restarting listener for user {user_id} toggle")
                 # Stop listening
                 await translator.stop_listening(voice_clients[guild_id])
 
@@ -230,14 +229,15 @@ async def handle_command(data, websocket):
 
                 # Restart listening with fresh settings
                 success, message = await translator.start_listening(voice_clients[guild_id])
-                print(f"TOGGLE-RESULT: Restart {success}, {message}")
+                logger.debug(f"Restart result: {success}, {message}")
 
                 # Verify the new settings were applied
                 if hasattr(voice_clients[guild_id], '_player') and voice_clients[guild_id]._player:
                     sink = voice_clients[guild_id]._player.source
                     if hasattr(sink, 'parent') and sink.parent:
-                        print(
-                            f"VERIFY-SETTINGS: User {user_id} is now {'enabled' if sink.parent.user_processing_enabled.get(user_id, False) else 'disabled'}")
+                        enabled_status = "enabled" if sink.parent.user_processing_enabled.get(
+                            user_id, False) else "disabled"
+                        logger.debug(f"User {user_id} is now {enabled_status}")
 
         # Notify all clients of the change
         for connection in active_connections:
@@ -284,12 +284,12 @@ async def broadcast_translation(user_id, text, message_type="translation"):
 
         # Store in history (only store translations to avoid duplicates)
         if message_type == "translation":
-            translations.append(message)
             # Keep only the last 100 translations
+            translations.append(message)
             if len(translations) > 100:
                 translations.pop(0)
 
-        print(f"Broadcasting {message_type} from {user_name}: {text}")
+        logger.info(f"Broadcasting {message_type} from {user_name}: {text}")
 
         # Broadcast to all clients
         for connection in active_connections:
@@ -299,12 +299,12 @@ async def broadcast_translation(user_id, text, message_type="translation"):
                     "data": message
                 })
             except Exception as e:
-                print(f"Error sending to client: {e}")
+                logger.warning(f"Error sending to client: {e}")
 
     except Exception as e:
-        print(f"Error in broadcast_translation: {str(e)}")
+        logger.error(f"Error in broadcast_translation: {e}")
         import traceback
-        print(f"Traceback: {traceback.format_exc()}")
+        logger.debug(f"Traceback: {traceback.format_exc()}")
 
 
 # Add a toggle tracking timestamp

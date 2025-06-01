@@ -33,4 +33,4 @@ def patched_start_recording(self, sink, callback, *args, **kwargs):
 
 # Apply the monkey patch
 VoiceClient.start_recording = patched_start_recording
-print("Discord voice client patched for better toggle support")
+# print("Discord voice client patched for better toggle support")

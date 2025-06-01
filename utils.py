@@ -21,6 +21,10 @@ import string
 import numpy as np
 import requests
 import stable_whisper
+from logging_config import get_logger
+
+# Initialize logger for this module
+logger = get_logger(__name__)
 
 # Model reference (will be loaded on demand, not at import time)
 MODEL = None

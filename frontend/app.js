@@ -256,7 +256,7 @@ function displayMessageWithContinuity(container, data, messageType) {
     
     if (lastSpeaker === user && lastMessage) {
         // Same speaker, append to existing message
-        console.log("🔄 Combining with previous message");
+        console.log("Combining with previous message");
         const contentSpan = lastMessage.querySelector('.message-content');
         
         // Check if content span exists

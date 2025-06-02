@@ -31,7 +31,6 @@ class VoiceTranslator:
             # We don't actually load the model here - it will be loaded
             # on-demand when transcribe is first called
             if hasattr(utils, "_load_model_if_needed"):
-                logger.info("Model will be loaded on-demand when needed")
                 self.model_loaded = True
                 return True
             else:
@@ -98,9 +97,6 @@ class VoiceTranslator:
                 except ImportError:
                     print("DEBUG: Could not import server module")
 
-            # Create a totally bullet-proof callback function
-            print("DEBUG: Creating robust callback function")
-
             # Define the audio callback - the KEY fix is here
             # The audio callback must be a normal function that returns a coroutine
             # And it needs to be resistant to any argument patterns
@@ -123,8 +119,6 @@ class VoiceTranslator:
                 return dummy_process()
 
             # Start recording with our bullet-proof callback
-            print(
-                f"DEBUG: Starting recording with sink type: {type(self.sink)}")
             voice_client.start_recording(self.sink, audio_callback)
             print("DEBUG: Recording started successfully")
 

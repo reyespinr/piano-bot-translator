@@ -474,29 +474,6 @@ async def on_voice_state_update(member, before, after):
                 })
 
 
-# Create the assets directory if it doesn't exist
-if not os.path.exists('assets'):
-    os.makedirs('assets')
-
-# Create a simple favicon.ico file if it doesn't exist
-if not os.path.exists('assets/favicon.ico'):
-    import shutil
-    # Try to copy from the frontend directory if it exists there
-    try:
-        if os.path.exists('frontend/favicon.ico'):
-            shutil.copy('frontend/favicon.ico', 'assets/favicon.ico')
-            print("Copied favicon.ico from frontend to assets directory")
-        else:
-            # Create a placeholder favicon file
-            with open('assets/favicon.ico', 'wb') as f:
-                # Write a minimal 16x16 ICO file (just enough to be valid)
-                f.write(bytes.fromhex(
-                    '00000100010010100000010020006804000016000000'))
-                f.write(bytes([0] * 1024))  # Pad with zeros
-            print("Created placeholder favicon.ico in assets directory")
-    except Exception as e:
-        print(f"Error creating favicon: {e}")
-
 # Mount static files for the frontend
 app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
 

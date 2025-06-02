@@ -42,9 +42,9 @@ def _load_model_if_needed():
     """Lazy load the model only when needed - truly on-demand loading"""
     global MODEL
     if MODEL is None:
-        print(f"Loading stable-ts {MODEL_NAME} model...")
+        logger.info(f"Loading stable-ts {MODEL_NAME} model...")
         MODEL = stable_whisper.load_model(MODEL_NAME, device="cuda")
-        print("stable-ts model loaded successfully!")
+        logger.info("stable-ts model loaded successfully!")
     return MODEL
 
 

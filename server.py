@@ -384,9 +384,17 @@ async def leave_voice_channel():
 
         guild_id = connected_channel.guild.id
 
+        # Store channel info for logging before we clear it
+        channel_name = connected_channel.name
+        guild_name = connected_channel.guild.name
+
         if guild_id in voice_clients:
             await voice_clients[guild_id].disconnect()
             del voice_clients[guild_id]
+
+        # Log successful disconnection
+        logger.info(
+            f"Disconnected from voice channel '{channel_name}' in server '{guild_name}'")
 
         connected_channel = None
         connected_users = []
@@ -505,9 +513,8 @@ async def join_voice_channel(channel_id):
             return False, f"Channel with ID {channel_id} not found"
 
         if not isinstance(channel, discord.VoiceChannel):
+            # Check if already connected to a voice channel
             return False, "The specified channel is not a voice channel"
-
-        # Check if already connected to a voice channel
         if connected_channel:
             # Get the guild ID of the current connected channel
             current_guild_id = connected_channel.guild.id
@@ -516,14 +523,18 @@ async def join_voice_channel(channel_id):
                 # Disconnect from the current voice channel
                 await voice_clients[current_guild_id].disconnect()
                 del voice_clients[current_guild_id]
-                print(
-                    f"Disconnected from previous channel: {connected_channel.name}")
+                logger.info(
+                    f"Disconnected from voice channel '{connected_channel.name}' in server '{connected_channel.guild.name}'")
                 connected_channel = None
 
         # Connect to the new voice channel
         voice_client = await channel.connect()
         voice_clients[channel.guild.id] = voice_client
         connected_channel = channel
+
+        # Log successful connection with channel and guild info
+        logger.info(
+            f"Connected to voice channel '{channel.name}' in server '{channel.guild.name}'")
 
         # Update connected users list - exclude bot
         # No need to call fetch_members, just use the cached members
@@ -541,7 +552,8 @@ async def join_voice_channel(channel_id):
                 if member_data["id"] not in user_processing_enabled:
                     user_processing_enabled[member_data["id"]] = True
 
-        print(f"Connected users: {[user['name'] for user in connected_users]}")
+        logger.info(
+            f"Connected users: {[user['name'] for user in connected_users]}")
 
         # Notify clients of updated user list
         for connection in active_connections:

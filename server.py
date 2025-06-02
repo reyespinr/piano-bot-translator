@@ -500,9 +500,6 @@ if not os.path.exists('assets/favicon.ico'):
 # Mount static files for the frontend
 app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
 
-# Mount assets directory for favicon
-app.mount("/assets", StaticFiles(directory="assets"), name="assets")
-
 
 async def join_voice_channel(channel_id):
     try:

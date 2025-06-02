@@ -9,6 +9,10 @@ import time
 import re
 import subprocess
 import sys
+from logging_config import get_logger
+
+# Initialize logger for this module
+logger = get_logger(__name__)
 
 
 def clean_temp_files(directory='.', pattern=r'\d+_\d+_speech\.wav$', age_minutes=0):
@@ -25,7 +29,7 @@ def clean_temp_files(directory='.', pattern=r'\d+_\d+_speech\.wav$', age_minutes
     size = 0
     failed_files = []
 
-    print(f"Scanning for temporary audio files...")
+    logger.info("Scanning for temporary audio files...")
 
     # Compile the regex pattern
     file_pattern = re.compile(pattern)
@@ -52,18 +56,18 @@ def clean_temp_files(directory='.', pattern=r'\d+_\d+_speech\.wav$', age_minutes
                     failed_files.append(filename)
 
             except (OSError, PermissionError) as e:
-                print(f"Error processing {filename}: {e}")
+                logger.error(f"Error processing {filename}: {e}")
                 failed_files.append(filename)
 
     if count > 0:
-        print(
+        logger.info(
             f"Cleanup: Removed {count} temporary audio files ({size/1024/1024:.2f} MB)")
     else:
-        print("No temporary audio files found to clean up.")
+        logger.info("No temporary audio files found to clean up.")
 
     if failed_files:
-        print(f"Failed to remove {len(failed_files)} files: {', '.join(failed_files[:5])}" +
-              (f" and {len(failed_files)-5} more" if len(failed_files) > 5 else ""))
+        logger.warning(f"Failed to remove {len(failed_files)} files: {', '.join(failed_files[:5])}" +
+                       (f" and {len(failed_files)-5} more" if len(failed_files) > 5 else ""))
 
 
 def force_delete_file(filepath):

@@ -11,18 +11,22 @@ logger = get_logger(__name__)
 class VoiceTranslator:
     def __init__(self, translation_callback: Callable[[str, str], None]):
         """
-        Initialize the voice translator        Args:
+        Initialize the voice translator
+
+        Args:
             translation_callback: Function to call when a translation is ready
                                  Arguments: (user_name, translated_text)
         """
         self.translation_callback = translation_callback
         self.active_voices = {}
         self.sink = None
-        self.is_listening = False        # No need to preload the model at initialization
+        self.is_listening = False
+        # No need to preload the model at initialization
         self.model_loaded = False
 
     async def load_models(self):
-        """Verify model loading capabilities without actually loading the model"""        try:
+        """Verify model loading capabilities without actually loading the model"""
+        try:
             logger.info("Loading translation models...")
             # We don't actually load the model here - it will be loaded
             # on-demand when transcribe is first called
@@ -88,14 +92,14 @@ class VoiceTranslator:
                         # Create a simple object with user_processing_enabled
                         self.sink.parent = type('obj', (object,), {})
                         self.sink.parent.user_processing_enabled = server_module.user_processing_enabled
-                        print(
-                            f"DEBUG: Set user_processing_enabled from server module with {len(server_module.user_processing_enabled)} entries")
+                        logger.debug(
+                            "Set user_processing_enabled from server module with %d entries",
+                            len(server_module.user_processing_enabled))
                 except ImportError:
-                    # Define the audio callback - the KEY fix is here
-                    print("DEBUG: Could not import server module")
+                    logger.debug("Could not import server module")
+
             # The audio callback must be a normal function that returns a coroutine
             # And it needs to be resistant to any argument patterns
-
             def audio_callback(_sink, *args):
                 # Create a dummy coroutine that does nothing
                 async def dummy_process():
@@ -105,9 +109,9 @@ class VoiceTranslator:
                             user_id = args[0]
                             audio_data = args[1] if len(args) > 1 else None
                             audio_length = len(audio_data) if audio_data else 0
-                            print(
-                                f"Audio received from user {user_id}, length: {audio_length}")
-                        except Exception:
+                            logger.debug(
+                                "Audio received from user %s, length: %d", user_id, audio_length)
+                        except (IndexError, TypeError, AttributeError):
                             # Just silently handle any exceptions in the logging
                             pass
                     return
@@ -116,62 +120,56 @@ class VoiceTranslator:
 
             # Start recording with our bullet-proof callback
             voice_client.start_recording(self.sink, audio_callback)
-            print("DEBUG: Recording started successfully")
+            logger.debug("Recording started successfully")
 
             self.is_listening = True
-            print(
-                f"DEBUG: Started listening in channel: {voice_client.channel.name}")
+            logger.debug("Started listening in channel: %s",
+                         voice_client.channel.name)
             return True, "Started listening"
-        except Exception as e:
-            import traceback
-            print(f"DEBUG: Error in start_listening: {str(e)}")
-            print(f"DEBUG: Traceback: {traceback.format_exc()}")
+        except (ConnectionError, AttributeError, ValueError) as e:
+            logger.error("Error in start_listening: %s", str(e))
             return False, f"Error: {str(e)}"
 
     async def stop_listening(self, voice_client):
         """Stop listening and processing audio"""
-        print(
-            f"DEBUG: stop_listening called. Voice client valid: {voice_client is not None}")
+        logger.debug(
+            "stop_listening called. Voice client valid: %s", voice_client is not None)
         if not voice_client:
-            print("DEBUG: Voice client is None, returning")
+            logger.debug("Voice client is None, returning")
             return False, "Not connected to a voice channel"
 
         try:
             # Stop recording
-            print("DEBUG: Stopping recording")
+            logger.debug("Stopping recording")
             voice_client.stop_recording()
-            print("DEBUG: Recording stopped successfully")
+            logger.debug("Recording stopped successfully")
 
             # Add a small delay to ensure workers can complete
-            print("DEBUG: Waiting for workers to finish...")
+            logger.debug("Waiting for workers to finish...")
             await asyncio.sleep(0.5)
 
             # Clean up sink resources
             if self.sink:
                 # Add extra safeguards before cleanup
                 try:
-                    print("DEBUG: Cleaning up sink resources")
+                    logger.debug("Cleaning up sink resources")
                     self.sink.cleanup()
-                    print("DEBUG: Sink cleanup completed")
+                    logger.debug("Sink cleanup completed")
                     # Wait for workers to finish
                     await asyncio.sleep(0.5)
-                except Exception as e:
-                    print(f"DEBUG: Error during sink cleanup: {e}")
-                    import traceback
-                    print(f"DEBUG: Traceback: {traceback.format_exc()}")
+                except (AttributeError, RuntimeError) as e:
+                    logger.warning("Error during sink cleanup: %s", str(e))
                 self.sink = None
-                print("DEBUG: Sink reference cleared")
+                logger.debug("Sink reference cleared")
 
             # Make sure the listening state is updated
             self.is_listening = False
-            print("DEBUG: Stopped listening")
+            logger.debug("Stopped listening")
 
             # Return success
             return True, "Stopped listening"
-        except Exception as e:
-            import traceback
-            print(f"DEBUG: Error in stop_listening: {str(e)}")
-            print(f"DEBUG: Traceback: {traceback.format_exc()}")
+        except (ConnectionError, AttributeError) as e:
+            logger.error("Error in stop_listening: %s", str(e))
             return False, f"Error: {str(e)}"
 
     async def toggle_listening(self, voice_client):
@@ -192,8 +190,9 @@ class VoiceTranslator:
                 if self.translation_callback:
                     try:
                         await self.translation_callback(user_id, text_content, message_type=message_type)
-                    except Exception as cb_error:
-                        print(f"Error in translation callback: {cb_error}")
+                    except (TypeError, AttributeError, ValueError) as cb_error:
+                        logger.error(
+                            "Error in translation callback: %s", str(cb_error))
                 return
 
             try:
@@ -202,13 +201,14 @@ class VoiceTranslator:
 
                 # Skip processing if transcription was empty
                 if not transcribed_text:
-                    print(f"Empty transcription for user {user_id}, skipping")
+                    logger.debug(
+                        "Empty transcription for user %s, skipping", user_id)
                     await self._force_delete_file(audio_file)
                     return
 
                 # Create transcription message
-                print(
-                    f"Sending transcription for user {user_id}: {transcribed_text}")
+                logger.info("Sending transcription for user %s: %s",
+                            user_id, transcribed_text)
                 await self.translation_callback(user_id, transcribed_text, message_type="transcription")
 
                 # Determine if translation is needed
@@ -216,27 +216,26 @@ class VoiceTranslator:
 
                 if needs_translation:
                     translated_text = await utils.translate(transcribed_text)
-                    print(f"Translated from {detected_language} to English")
+                    logger.info("Translated from %s to English",
+                                detected_language)
                     # Send the translation
-                    print(
-                        f"Sending translation for user {user_id}: {translated_text}")
+                    logger.info("Sending translation for user %s: %s",
+                                user_id, translated_text)
                     await self.translation_callback(user_id, translated_text, message_type="translation")
                 else:
                     # Skip translation for English
-                    print(
-                        f"Skipped translation - detected language: {detected_language}")
+                    logger.debug(
+                        "Skipped translation - detected language: %s", detected_language)
                     # For English, use the same text for translation display
-                    print(
-                        f"Sending direct text for user {user_id}: {transcribed_text}")
+                    logger.info("Sending direct text for user %s: %s",
+                                user_id, transcribed_text)
                     await self.translation_callback(user_id, transcribed_text, message_type="translation")
             finally:
                 # CRITICAL: Always delete the file when done with it
                 await self._force_delete_file(audio_file)
 
-        except Exception as e:
-            print(f"Error in process_audio_callback: {str(e)}")
-            import traceback
-            print(f"Traceback: {traceback.format_exc()}")
+        except (OSError, RuntimeError, ValueError) as e:
+            logger.error("Error in process_audio_callback: %s", str(e))
             # Make sure to clean up even if exception occurs
             await self._force_delete_file(audio_file)
 
@@ -254,15 +253,16 @@ class VoiceTranslator:
 
                 # Delete and verify
                 os.remove(file_path)
-                print(f"🗑️ Deleted file: {os.path.basename(file_path)}")
+                logger.debug("Deleted file: %s", os.path.basename(file_path))
 
                 if not os.path.exists(file_path):
                     return True
 
-                print(
-                    f"⚠️ File still exists after deletion attempt: {file_path}")
+                logger.warning(
+                    "File still exists after deletion attempt: %s", file_path)
             except (PermissionError, OSError) as e:
-                print(f"🔄 Deletion attempt {attempt+1} failed: {e}")
+                logger.warning("Deletion attempt %d failed: %s",
+                               attempt+1, str(e))
                 await asyncio.sleep(0.5)  # Wait before retry
 
         # Last resort: try with Windows-specific commands
@@ -271,13 +271,14 @@ class VoiceTranslator:
                 import subprocess
                 subprocess.run(f'del /F "{file_path}"',
                                shell=True, check=False)
-                print(
-                    f"🗑️ Attempted deletion with Windows command: {file_path}")
+                logger.debug(
+                    "Attempted deletion with Windows command: %s", file_path)
                 return not os.path.exists(file_path)
-            except Exception as e:
-                print(f"❌ Windows command deletion failed: {e}")
+            except (OSError, subprocess.SubprocessError) as e:
+                logger.error("Windows command deletion failed: %s", str(e))
 
-        print(f"⚠️ Failed to delete file after multiple attempts: {file_path}")
+        logger.warning(
+            "Failed to delete file after multiple attempts: %s", file_path)
         return False
 
     def _cleanup_audio_file(self, audio_file):
@@ -295,8 +296,9 @@ class VoiceTranslator:
                     if self.is_listening:
                         voice_client.stop_recording()
                     asyncio.create_task(voice_client.disconnect())
-            except Exception as e:
-                print(f"Error during cleanup for guild {guild_id}: {str(e)}")
+            except (AttributeError, ConnectionError) as e:
+                logger.error(
+                    "Error during cleanup for guild %s: %s", guild_id, str(e))
 
         # Clean up sink
         if self.sink:

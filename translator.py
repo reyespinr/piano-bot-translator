@@ -1,9 +1,6 @@
 import asyncio
-import discord
 import os
-import threading
-import time
-from typing import Callable, Dict, Any
+from typing import Callable
 from custom_sink import RealTimeWaveSink
 import utils
 from logging_config import get_logger
@@ -36,7 +33,8 @@ class VoiceTranslator:
             logger.warning("Model loading mechanism not found")
             return False
         except Exception as e:
-            logger.error(f"Error verifying model loading capability: {str(e)}")
+            logger.error(
+                "Error verifying model loading capability: %s", str(e))
             return False
 
     def setup_voice_receiver(self, voice_client):
@@ -66,16 +64,16 @@ class VoiceTranslator:
             # Set parent reference to access user_processing_enabled dictionary
             # Create a simple object to hold the user_processing_enabled dictionary
             if hasattr(self, 'user_processing_enabled'):
-                self.sink.parent = type('obj', (object,), {})
-
                 # CRITICAL FIX: Create a fresh copy of the dictionary to prevent reference issues
+                self.sink.parent = type('obj', (object,), {})
                 processing_settings = {}
                 for k, v in self.user_processing_enabled.items():
                     processing_settings[str(k)] = bool(v)
 
                 self.sink.parent.user_processing_enabled = processing_settings
-                logger.debug(
-                    f"Active user settings: {', '.join([f'{k}={v}' for k, v in processing_settings.items()])}")
+                settings_str = ', '.join(
+                    [f'{k}={v}' for k, v in processing_settings.items()])
+                logger.debug("Active user settings: %s", settings_str)
             elif hasattr(voice_client, 'guild') and voice_client.guild:
                 # Try to import from server module as a fallback
                 try:
@@ -94,12 +92,12 @@ class VoiceTranslator:
                         print(
                             f"DEBUG: Set user_processing_enabled from server module with {len(server_module.user_processing_enabled)} entries")
                 except ImportError:
+                    # Define the audio callback - the KEY fix is here
                     print("DEBUG: Could not import server module")
-
-            # Define the audio callback - the KEY fix is here
             # The audio callback must be a normal function that returns a coroutine
             # And it needs to be resistant to any argument patterns
-            def audio_callback(sink, *args):
+
+            def audio_callback(_sink, *args):
                 # Create a dummy coroutine that does nothing
                 async def dummy_process():
                     # Only log if we have proper arguments
@@ -181,8 +179,7 @@ class VoiceTranslator:
         """Toggle listening on/off"""
         if self.is_listening:
             return await self.stop_listening(voice_client)
-        else:
-            return await self.start_listening(voice_client)
+        return await self.start_listening(voice_client)
 
     async def process_audio_callback(self, user_id, audio_file, message_type=None):
         """Process audio data and generate translations"""

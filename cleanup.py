@@ -56,18 +56,21 @@ def clean_temp_files(directory='.', pattern=r'\d+_\d+_speech\.wav$', age_minutes
                     failed_files.append(filename)
 
             except (OSError, PermissionError) as e:
-                logger.error(f"Error processing {filename}: {e}")
+                logger.error("Error processing %s: %s", filename, e)
                 failed_files.append(filename)
 
     if count > 0:
         logger.info(
-            f"Cleanup: Removed {count} temporary audio files ({size/1024/1024:.2f} MB)")
+            "Cleanup: Removed %d temporary audio files (%.2f MB)", 
+            count, size/1024/1024)
     else:
         logger.info("No temporary audio files found to clean up.")
 
     if failed_files:
-        logger.warning(f"Failed to remove {len(failed_files)} files: {', '.join(failed_files[:5])}" +
-                       (f" and {len(failed_files)-5} more" if len(failed_files) > 5 else ""))
+        logger.warning("Failed to remove %d files: %s%s", 
+                      len(failed_files), 
+                      ', '.join(failed_files[:5]),
+                      " and %d more" % (len(failed_files)-5) if len(failed_files) > 5 else "")
 
 
 def force_delete_file(filepath):
@@ -85,7 +88,7 @@ def force_delete_file(filepath):
             subprocess.run(f'del /F "{filepath}"', shell=True, check=False)
             if not os.path.exists(filepath):
                 return True
-        except Exception:
+        except (subprocess.SubprocessError, OSError):
             pass
 
     # Try again after a brief pause
@@ -93,7 +96,7 @@ def force_delete_file(filepath):
         time.sleep(0.5)
         os.remove(filepath)
         return True
-    except Exception:
+    except (PermissionError, OSError):
         return False
 
 

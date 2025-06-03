@@ -61,8 +61,7 @@ function sendCommand(command, data = {}) {
 function handleWebSocketMessage(message) {
     console.log('Received message:', message);
     
-    switch (message.type) {
-        case 'status':
+    switch (message.type) {        case 'status':
             // Handle initial status
             if (message.connected_channel) {
                 connectionStatus.textContent = `Connected to: ${message.connected_channel}`;
@@ -78,6 +77,18 @@ function handleWebSocketMessage(message) {
                         displayMessage(t, translationsContainer);
                     });
                 }
+            }
+            
+            // CRITICAL FIX: Handle initial listening state
+            if (typeof message.is_listening !== 'undefined') {
+                console.log('🎧 Initial listen state received:', message.is_listening);
+                updateListenButtonState(message.is_listening);
+            }
+            
+            // CRITICAL FIX: Handle initial user list
+            if (message.users) {
+                console.log('👥 Initial user list received:', message.users);
+                updateUserList(message.users, message.enabled_states);
             }
             break;
             

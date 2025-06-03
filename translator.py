@@ -33,9 +33,8 @@ class VoiceTranslator:
             if hasattr(utils, "_load_model_if_needed"):
                 self.model_loaded = True
                 return True
-            else:
-                logger.warning("Model loading mechanism not found")
-                return False
+            logger.warning("Model loading mechanism not found")
+            return False
         except Exception as e:
             logger.error(f"Error verifying model loading capability: {str(e)}")
             return False

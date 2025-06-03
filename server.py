@@ -124,14 +124,15 @@ translator = None
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    active_connections.append(websocket)
-
-    # Send initial state to new client
+    active_connections.append(websocket)    # Send initial state to new client
     await websocket.send_json({
         "type": "status",
         "bot_ready": bot_ready,
         "connected_channel": str(connected_channel) if connected_channel else None,
-        "translations": translations[-20:]  # Send last 20 translations
+        "translations": translations[-20:],  # Send last 20 translations
+        "is_listening": is_listening,  # CRITICAL FIX: Include current listening state
+        "users": connected_users,  # Include current user list
+        "enabled_states": user_processing_enabled  # Include user toggle states
     })
 
     try:
@@ -388,6 +389,19 @@ async def leave_voice_channel():
         channel_name = connected_channel.name
         guild_name = connected_channel.guild.name
 
+        # CRITICAL FIX: Stop listening BEFORE disconnecting voice client
+        if is_listening and guild_id in voice_clients:
+            try:
+                await translator.stop_listening(voice_clients[guild_id])
+                print(f"Stopped listening before leaving channel")
+            except Exception as e:
+                print(f"Error stopping listening during disconnect: {str(e)}")
+
+        # Always reset listening state when leaving channel
+        if is_listening:
+            is_listening = False
+            print(f"Reset is_listening state to False")
+
         if guild_id in voice_clients:
             await voice_clients[guild_id].disconnect()
             del voice_clients[guild_id]
@@ -407,13 +421,12 @@ async def leave_voice_channel():
                 "enabled_states": user_processing_enabled
             })
 
-        # Make sure to stop listening if active
-        if is_listening and guild_id in voice_clients:
-            try:
-                await translator.stop_listening(voice_clients[guild_id])
-                is_listening = False
-            except Exception as e:
-                print(f"Error stopping listening during disconnect: {str(e)}")
+        # CRITICAL FIX: Notify all clients that listening has stopped
+        for connection in active_connections:
+            await connection.send_json({
+                "type": "listen_status",
+                "is_listening": False
+            })
 
         return True, "Disconnected from voice channel"
     except Exception as e:
@@ -480,7 +493,7 @@ app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
 
 async def join_voice_channel(channel_id):
     try:
-        global connected_channel, connected_users, user_processing_enabled
+        global connected_channel, connected_users, user_processing_enabled, is_listening
         channel = bot.get_channel(channel_id)
 
         if not channel:
@@ -494,6 +507,26 @@ async def join_voice_channel(channel_id):
             current_guild_id = connected_channel.guild.id
 
             if current_guild_id in voice_clients:
+                # CRITICAL FIX: Stop listening BEFORE disconnecting when switching channels
+                if is_listening:
+                    try:
+                        await translator.stop_listening(voice_clients[current_guild_id])
+                        print(f"Stopped listening before switching channels")
+                    except Exception as e:
+                        print(
+                            f"Error stopping listening during channel switch: {str(e)}")
+
+                    # Reset listening state
+                    is_listening = False
+                    print(f"Reset is_listening state to False during channel switch")
+
+                    # Notify clients that listening has stopped
+                    for connection in active_connections:
+                        await connection.send_json({
+                            "type": "listen_status",
+                            "is_listening": False
+                        })
+
                 # Disconnect from the current voice channel
                 await voice_clients[current_guild_id].disconnect()
                 del voice_clients[current_guild_id]

@@ -28,8 +28,8 @@ logger = get_logger(__name__)
 
 # Model reference (will be loaded on demand, not at import time)
 MODEL = None
-# MODEL_NAME = "large-v3-turbo"
-MODEL_NAME = "base"
+MODEL_NAME = "large-v3-turbo"
+# MODEL_NAME = "base"
 
 
 # Common hallucinations to filter out

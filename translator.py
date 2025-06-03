@@ -1,5 +1,16 @@
+"""
+Voice translation module for Discord bot.
+
+This module provides real-time voice transcription and translation capabilities
+for Discord voice channels. It handles audio processing, language detection,
+transcription, and translation using machine learning models.
+"""
 import asyncio
 import os
+import gc
+import sys
+import importlib
+import subprocess
 from typing import Callable
 from custom_sink import RealTimeWaveSink
 import utils
@@ -9,19 +20,27 @@ logger = get_logger(__name__)
 
 
 class VoiceTranslator:
+    """
+    Handles real-time voice transcription and translation for Discord.
+
+    This class manages audio processing, language detection, transcription,
+    and translation for Discord voice channels. It provides methods to start
+    and stop listening, process audio callbacks, and manage voice client
+    connections.
+    """
+
     def __init__(self, translation_callback: Callable[[str, str], None]):
         """
         Initialize the voice translator
 
         Args:
-            translation_callback: Function to call when a translation is ready
-                                 Arguments: (user_name, translated_text)
+            translation_callback: Function to call when a translation is ready.
+                                    Arguments: (user_name, translated_text)
         """
         self.translation_callback = translation_callback
         self.active_voices = {}
         self.sink = None
         self.is_listening = False
-        # No need to preload the model at initialization
         self.model_loaded = False
 
     async def load_models(self):
@@ -74,15 +93,13 @@ class VoiceTranslator:
                     processing_settings[str(k)] = bool(v)
 
                 self.sink.parent.user_processing_enabled = processing_settings
-                settings_str = ', '.join(
-                    [f'{k}={v}' for k, v in processing_settings.items()])
+                settings_items = [f"{k}={v}" for k,
+                                  v in processing_settings.items()]
+                settings_str = ', '.join(settings_items)
                 logger.debug("Active user settings: %s", settings_str)
             elif hasattr(voice_client, 'guild') and voice_client.guild:
                 # Try to import from server module as a fallback
                 try:
-                    # Import here to avoid circular imports
-                    import sys
-                    import importlib
                     if 'server' in sys.modules:
                         server_module = sys.modules['server']
                     else:
@@ -248,7 +265,6 @@ class VoiceTranslator:
         for attempt in range(3):
             try:
                 # Force garbage collection to release file handles
-                import gc
                 gc.collect()
 
                 # Delete and verify
@@ -268,7 +284,6 @@ class VoiceTranslator:
         # Last resort: try with Windows-specific commands
         if os.name == 'nt':
             try:
-                import subprocess
                 subprocess.run(f'del /F "{file_path}"',
                                shell=True, check=False)
                 logger.debug(

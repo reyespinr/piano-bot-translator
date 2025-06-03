@@ -676,7 +676,9 @@ class RealTimeWaveSink(WaveSink):
 
                     return
                 except TypeError as e:
-                    # Try without message_type parameter as a fallback                    logger.debug(f"Error with message_type parameter: {e}, trying without it")
+                    # Try without message_type parameter as a fallback
+                    logger.debug(
+                        f"Error with message_type parameter: {e}, trying without it")
                     await self.translation_callback(user, transcribed_text)
                     if transcribed_text != translated_text:
                         await self.translation_callback(user, translated_text)

@@ -70,7 +70,7 @@ def clean_temp_files(directory='.', pattern=r'\d+_\d+_speech\.wav$', age_minutes
         logger.warning("Failed to remove %d files: %s%s",
                        len(failed_files),
                        ', '.join(failed_files[:5]),
-                       " and %d more" % (len(failed_files)-5) if len(failed_files) > 5 else "")
+                       f" and {len(failed_files)-5} more" if len(failed_files) > 5 else "")
 
 
 def force_delete_file(filepath):

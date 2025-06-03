@@ -18,6 +18,10 @@ from logging_config import get_logger
 
 logger = get_logger(__name__)
 
+# Constants for cleanup and deletion
+CLEANUP_DELAY = 0.5
+MAX_DELETE_RETRIES = 3
+
 
 class VoiceTranslator:
     """
@@ -166,7 +170,7 @@ class VoiceTranslator:
 
             # Add a small delay to ensure workers can complete
             logger.debug("Waiting for workers to finish...")
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(CLEANUP_DELAY)
 
             # Clean up sink resources
             if self.sink:
@@ -176,7 +180,7 @@ class VoiceTranslator:
                     self.sink.cleanup()
                     logger.debug("Sink cleanup completed")
                     # Wait for workers to finish
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(CLEANUP_DELAY)
                 except (AttributeError, RuntimeError) as e:
                     logger.warning("Error during sink cleanup: %s", str(e))
                 self.sink = None
@@ -275,7 +279,7 @@ class VoiceTranslator:
             return False
 
         # Try to delete the file with multiple retries
-        for attempt in range(3):
+        for attempt in range(MAX_DELETE_RETRIES):
             try:
                 # Force garbage collection to release file handles
                 gc.collect()

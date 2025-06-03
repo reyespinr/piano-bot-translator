@@ -8,8 +8,6 @@ import os
 import time
 from typing import Dict, List
 from contextlib import asynccontextmanager
-# Import the toggle fix module to apply the patch
-import toggle_fix  # This applies the monkey patch
 from translator import VoiceTranslator
 import utils  # Import utils for create_dummy_audio_file and transcribe
 from logging_config import get_logger

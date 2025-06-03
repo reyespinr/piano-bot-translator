@@ -22,8 +22,7 @@ class VoiceTranslator:
         self.model_loaded = False
 
     async def load_models(self):
-        """Verify model loading capabilities without actually loading the model"""
-        try:
+        """Verify model loading capabilities without actually loading the model"""        try:
             logger.info("Loading translation models...")
             # We don't actually load the model here - it will be loaded
             # on-demand when transcribe is first called
@@ -32,7 +31,7 @@ class VoiceTranslator:
                 return True
             logger.warning("Model loading mechanism not found")
             return False
-        except Exception as e:
+        except (AttributeError, ImportError) as e:
             logger.error(
                 "Error verifying model loading capability: %s", str(e))
             return False

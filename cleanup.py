@@ -61,16 +61,16 @@ def clean_temp_files(directory='.', pattern=r'\d+_\d+_speech\.wav$', age_minutes
 
     if count > 0:
         logger.info(
-            "Cleanup: Removed %d temporary audio files (%.2f MB)", 
+            "Cleanup: Removed %d temporary audio files (%.2f MB)",
             count, size/1024/1024)
     else:
         logger.info("No temporary audio files found to clean up.")
 
     if failed_files:
-        logger.warning("Failed to remove %d files: %s%s", 
-                      len(failed_files), 
-                      ', '.join(failed_files[:5]),
-                      " and %d more" % (len(failed_files)-5) if len(failed_files) > 5 else "")
+        logger.warning("Failed to remove %d files: %s%s",
+                       len(failed_files),
+                       ', '.join(failed_files[:5]),
+                       " and %d more" % (len(failed_files)-5) if len(failed_files) > 5 else "")
 
 
 def force_delete_file(filepath):

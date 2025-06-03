@@ -44,7 +44,7 @@ class VoiceTranslator:
         self.model_loaded = False
 
     async def load_models(self):
-        """Verify model loading capabilities without actually loading the model"""
+        """Verify model loading capabilities without loading the model"""
         try:
             logger.info("Loading translation models...")
             # We don't actually load the model here - it will be loaded
@@ -84,9 +84,9 @@ class VoiceTranslator:
             self.sink.translation_callback = self.process_audio_callback
 
             # Set parent reference to access user_processing_enabled dictionary
-            # Create a simple object to hold the user_processing_enabled dictionary
+            # Create a simple object to hold the user_processing_enabled dict
             if hasattr(self, 'user_processing_enabled'):
-                # CRITICAL FIX: Create a fresh copy of the dictionary to prevent reference issues
+                # CRITICAL FIX: Create fresh copy to prevent reference issues
                 self.sink.parent = type('obj', (object,), {})
                 processing_settings = {}
                 for k, v in self.user_processing_enabled.items():
@@ -108,9 +108,11 @@ class VoiceTranslator:
                     if hasattr(server_module, 'user_processing_enabled'):
                         # Create a simple object with user_processing_enabled
                         self.sink.parent = type('obj', (object,), {})
-                        self.sink.parent.user_processing_enabled = server_module.user_processing_enabled
+                        self.sink.parent.user_processing_enabled = (
+                            server_module.user_processing_enabled)
                         logger.debug(
-                            "Set user_processing_enabled from server module with %d entries",
+                            "Set user_processing_enabled from server module "
+                            "with %d entries",
                             len(server_module.user_processing_enabled))
                 except ImportError:
                     logger.debug("Could not import server module")
@@ -127,7 +129,8 @@ class VoiceTranslator:
                             audio_data = args[1] if len(args) > 1 else None
                             audio_length = len(audio_data) if audio_data else 0
                             logger.debug(
-                                "Audio received from user %s, length: %d", user_id, audio_length)
+                                "Audio received from user %s, length: %d",
+                                user_id, audio_length)
                         except (IndexError, TypeError, AttributeError):
                             # Just silently handle any exceptions in the logging
                             pass
@@ -198,15 +201,18 @@ class VoiceTranslator:
     async def process_audio_callback(self, user_id, audio_file, message_type=None):
         """Process audio data and generate translations"""
         try:
-            # If we're called with a message_type, it's a direct text message, not an audio file
+            # If we're called with a message_type, it's a direct text message,
+            # not an audio file
             if message_type is not None:
-                # Here audio_file is actually the text content when message_type is provided
+                # Here audio_file is actually the text content when
+                # message_type is provided
                 text_content = audio_file
 
                 # Forward to translation callback
                 if self.translation_callback:
                     try:
-                        await self.translation_callback(user_id, text_content, message_type=message_type)
+                        await self.translation_callback(
+                            user_id, text_content, message_type=message_type)
                     except (TypeError, AttributeError, ValueError) as cb_error:
                         logger.error(
                             "Error in translation callback: %s", str(cb_error))
@@ -226,10 +232,13 @@ class VoiceTranslator:
                 # Create transcription message
                 logger.info("Sending transcription for user %s: %s",
                             user_id, transcribed_text)
-                await self.translation_callback(user_id, transcribed_text, message_type="transcription")
+                await self.translation_callback(user_id,
+                                                transcribed_text,
+                                                message_type="transcription")
 
                 # Determine if translation is needed
-                needs_translation = await utils.should_translate(transcribed_text, detected_language)
+                needs_translation = await utils.should_translate(transcribed_text,
+                                                                 detected_language)
 
                 if needs_translation:
                     translated_text = await utils.translate(transcribed_text)
@@ -238,7 +247,9 @@ class VoiceTranslator:
                     # Send the translation
                     logger.info("Sending translation for user %s: %s",
                                 user_id, translated_text)
-                    await self.translation_callback(user_id, translated_text, message_type="translation")
+                    await self.translation_callback(user_id,
+                                                    translated_text,
+                                                    message_type="translation")
                 else:
                     # Skip translation for English
                     logger.debug(
@@ -246,7 +257,9 @@ class VoiceTranslator:
                     # For English, use the same text for translation display
                     logger.info("Sending direct text for user %s: %s",
                                 user_id, transcribed_text)
-                    await self.translation_callback(user_id, transcribed_text, message_type="translation")
+                    await self.translation_callback(user_id,
+                                                    transcribed_text,
+                                                    message_type="translation")
             finally:
                 # CRITICAL: Always delete the file when done with it
                 await self._force_delete_file(audio_file)

@@ -1,13 +1,23 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.staticfiles import StaticFiles
+"""
+server.py - Main FastAPI and Discord bot server module for the Piano Bot Translator.
+
+This module sets up the FastAPI app, manages Discord bot events, handles WebSocket connections
+for the frontend, and coordinates audio translation and user state for the Discord voice channel.
+"""
+
 import asyncio
 import json
+import time
+import traceback
+from typing import Dict, List, Optional
+from dataclasses import dataclass, field
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
 import discord
 from discord import VoiceClient
-import time
-from typing import Dict, List
-from contextlib import asynccontextmanager
 from translator import VoiceTranslator
+from cleanup import clean_temp_files
 import utils
 from logging_config import get_logger
 
@@ -18,24 +28,25 @@ logger = get_logger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):  # pylint: disable=unused-argument
+    """FastAPI lifespan context manager for startup and shutdown tasks.
+
+    Initializes the translator, loads models, cleans up temp files, starts the Discord bot,
+    and ensures proper shutdown of resources.
+    """
     # Startup
-    global translator, bot_ready    # Clean up any stray WAV files from previous runs
     try:
-        from cleanup import clean_temp_files
         clean_temp_files()
-    except Exception as e:
-        logger.warning(f"Could not run cleanup utility: {e}")
+    except (OSError, ImportError) as e:
+        logger.warning("Could not run cleanup utility: %s", e)
 
     # Initialize the translator
-    translator = VoiceTranslator(broadcast_translation)
-    await translator.load_models()
-    # Warm up the pipeline
+    state.translator = VoiceTranslator(broadcast_translation)
+    await state.translator.load_models()
     await utils.warm_up_pipeline()
 
-    # Get token from token.txt file
     try:
-        with open("token.txt", "r") as f:
+        with open("token.txt", "r", encoding="utf-8") as f:
             bot_token = f.read().strip()
         if not bot_token:
             logger.warning("token.txt file is empty")
@@ -46,24 +57,21 @@ async def lifespan(app: FastAPI):
         yield
         return
 
-    # Start the Discord bot
     asyncio.create_task(bot.start(bot_token))
-
     yield
 
     # Shutdown
-    global is_listening    # Stop listening if active
-    if is_listening and connected_channel:
-        guild_id = connected_channel.guild.id
-        if guild_id in voice_clients:
-            try:
-                await translator.stop_listening(voice_clients[guild_id])
-            except Exception as e:
-                logger.error(f"Error stopping listening during shutdown: {e}")
-
-    # Clean up translator resources
-    if translator:
-        translator.cleanup()
+    if state.is_listening and state.connected_channel is not None:
+        if hasattr(state.connected_channel, 'guild'):
+            guild_id = state.connected_channel.guild.id
+            if guild_id in state.voice_clients:
+                try:
+                    await state.translator.stop_listening(state.voice_clients[guild_id])
+                except (RuntimeError, AttributeError) as e:
+                    logger.error(
+                        "Error stopping listening during shutdown: %s", e)
+    if state.translator:
+        state.translator.cleanup()
 
 # Create the FastAPI app with the lifespan
 app = FastAPI(lifespan=lifespan)
@@ -85,56 +93,84 @@ bot = discord.Client(intents=intents)  # Change from Bot to Client
 
 @bot.event
 async def on_ready():
-    global bot_ready
-    bot_ready = True
-    logger.info(f"Bot is ready as {bot.user}")
+    """Discord bot ready event.
 
-    # Notify all connected clients that the bot is ready
+    Called when the bot has successfully connected to Discord and is ready to operate.
+    """
+    state.bot_ready = True
+    logger.info("Bot is ready as %s", bot.user)
     for connection in active_connections:
         await connection.send_json({
             "type": "bot_status",
             "ready": True
         })
 
-# Bot state
-bot_ready = False
-connected_channel = None
-translations = []
-voice_clients: Dict[int, VoiceClient] = {}
-# Add tracking for active users and their processing state
-connected_users = []
-user_processing_enabled = {}
-is_listening = False
 
-# Initialize the translator
-translator = None
+@dataclass
+class BotServerState:  # pylint: disable=too-many-instance-attributes
+    """Encapsulates all shared state for the Discord bot and FastAPI server."""
+    bot_ready: bool = False
+    connected_channel: Optional[discord.VoiceChannel] = None
+    translations: list = field(default_factory=list)
+    voice_clients: Dict[int, VoiceClient] = field(default_factory=dict)
+    connected_users: list = field(default_factory=list)
+    user_processing_enabled: dict = field(default_factory=dict)
+    is_listening: bool = False
+    # Audio processing state
+    translator: Optional[VoiceTranslator] = None
+    last_toggle_time: float = 0.0
+
+
+# Constants for timing control
+TOGGLE_COOLDOWN = 1.0  # seconds
+
+state = BotServerState()
 
 # WebSocket connection handling
 
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for frontend clients.
+
+    Accepts connections, sends initial state, and dispatches commands from the frontend.
+    """
     await websocket.accept()
     active_connections.append(websocket)    # Send initial state to new client
     await websocket.send_json({
         "type": "status",
-        "bot_ready": bot_ready,
-        "connected_channel": str(connected_channel) if connected_channel else None,
-        "translations": translations[-20:],  # Send last 20 translations
-        "is_listening": is_listening,  # CRITICAL FIX: Include current listening state
-        "users": connected_users,  # Include current user list
-        "enabled_states": user_processing_enabled  # Include user toggle states
+        "bot_ready": state.bot_ready,
+        "connected_channel": str(state.connected_channel) if state.connected_channel else None,
+        "translations": state.translations[-20:],  # Send last 20 translations
+        # CRITICAL FIX: Include current listening state
+        "is_listening": state.is_listening,
+        "users": state.connected_users,  # Include current user list
+        "enabled_states": state.user_processing_enabled  # Include user toggle states
     })
 
     try:
         while True:
             data = await websocket.receive_text()
             await handle_command(json.loads(data), websocket)
-    except WebSocketDisconnect:
-        active_connections.remove(websocket)
+    except WebSocketDisconnect as exc:
+        logger.info("WebSocket disconnected: %s", exc)
+        if websocket in active_connections:
+            active_connections.remove(websocket)
+    # pylint: disable-next=broad-except
+    except Exception as exc:
+        logger.error("Unexpected error in websocket_endpoint: %s",
+                     exc, exc_info=True)
+        if websocket in active_connections:
+            active_connections.remove(websocket)
 
 
+# pylint: disable=too-many-locals, too-many-branches
 async def handle_command(data, websocket):
+    """Handle commands received from the frontend WebSocket client.
+
+    Supports joining/leaving channels, toggling users, toggling listening,
+    and fetching guild/channel info.
+    """
     command = data.get("command")
 
     if command == "join_channel":
@@ -197,40 +233,30 @@ async def handle_command(data, websocket):
         enabled = data.get("enabled")
 
         # Update the user processing state
-        user_processing_enabled[user_id] = enabled
-        logger.debug(f"User {user_id} processing set to {enabled}")
-
+        state.user_processing_enabled[user_id] = enabled
         # Completely restart listening if active - the only solution that works reliably
-        if is_listening and connected_channel:
-            guild_id = connected_channel.guild.id
-            if guild_id in voice_clients:
-                logger.debug(f"Restarting listener for user {user_id} toggle")
-                # Stop listening
-                await translator.stop_listening(voice_clients[guild_id])
-
-                # Short pause to ensure cleanup
+        logger.debug("User %s processing set to %s", user_id, enabled)
+        if state.is_listening and state.connected_channel:
+            guild_id = state.connected_channel.guild.id
+            if guild_id in state.voice_clients:
+                logger.debug("Restarting listener for user %s toggle", user_id)
+                await state.translator.stop_listening(state.voice_clients[guild_id])
                 await asyncio.sleep(0.3)
-
-                # Create a fresh copy of settings
-                fresh_settings = {}
-                for uid, state in user_processing_enabled.items():
-                    fresh_settings[str(uid)] = bool(state)
-
-                # Update translator settings
-                translator.user_processing_enabled = fresh_settings
-
-                # Restart listening with fresh settings
-                success, message = await translator.start_listening(voice_clients[guild_id])
-                logger.debug(f"Restart result: {success}, {message}")
-
-                # Verify the new settings were applied
-                if hasattr(voice_clients[guild_id], '_player') and voice_clients[guild_id]._player:
-                    sink = voice_clients[guild_id]._player.source
+                fresh_settings = {str(uid): bool(state)
+                                  for uid, state in state.user_processing_enabled.items()}
+                state.translator.user_processing_enabled = fresh_settings
+                success, message = await state.translator.start_listening(
+                    state.voice_clients[guild_id])
+                logger.debug("Restart result: %s, %s", success, message)
+                # pylint: disable=protected-access
+                if (hasattr(state.voice_clients[guild_id], '_player')
+                        and state.voice_clients[guild_id]._player):
+                    sink = state.voice_clients[guild_id]._player.source
                     if hasattr(sink, 'parent') and sink.parent:
                         enabled_status = "enabled" if sink.parent.user_processing_enabled.get(
                             user_id, False) else "disabled"
-                        logger.debug(f"User {user_id} is now {enabled_status}")
-
+                        logger.debug("User %s is now %s",
+                                     user_id, enabled_status)
         # Notify all clients of the change
         for connection in active_connections:
             await connection.send_json({
@@ -257,12 +283,15 @@ async def handle_command(data, websocket):
 
 
 async def broadcast_translation(user_id, text, message_type="translation"):
-    """Send translation to all connected clients"""
+    """Send translation or message to all connected frontend clients.
+
+    Broadcasts translation results or other messages to all active WebSocket connections.
+    """
     try:
         # Get the user's display name
         user_name = "Unknown User"
-        if connected_channel:
-            member = connected_channel.guild.get_member(int(user_id))
+        if state.connected_channel is not None and hasattr(state.connected_channel, 'guild'):
+            member = state.connected_channel.guild.get_member(int(user_id))
             if member:
                 user_name = member.display_name
 
@@ -277,11 +306,12 @@ async def broadcast_translation(user_id, text, message_type="translation"):
         # Store in history (only store translations to avoid duplicates)
         if message_type == "translation":
             # Keep only the last 100 translations
-            translations.append(message)
-            if len(translations) > 100:
-                translations.pop(0)
+            state.translations.append(message)
+            if len(state.translations) > 100:
+                state.translations.pop(0)
 
-        logger.info(f"Broadcasting {message_type} from {user_name}: {text}")
+        logger.info("Broadcasting %s from %s: %s",
+                    message_type, user_name, text)
 
         # Broadcast to all clients
         for connection in active_connections:
@@ -290,127 +320,128 @@ async def broadcast_translation(user_id, text, message_type="translation"):
                     "type": message_type,
                     "data": message
                 })
-            except Exception as e:
-                logger.warning(f"Error sending to client: {e}")
+            except (OSError, ValueError, RuntimeError) as e:
+                logger.warning("Error sending to client: %s", e)
 
-    except Exception as e:
-        logger.error(f"Error in broadcast_translation: {e}")
-        import traceback
-        logger.debug(f"Traceback: {traceback.format_exc()}")
+    except (OSError, ValueError, RuntimeError) as e:
+        logger.error("Error in broadcast_translation: %s", e)
+        logger.debug("Traceback: %s", traceback.format_exc())
 
 
-# Add a toggle tracking timestamp
-last_toggle_time = 0
-toggle_cooldown = 1.0  # 1 second cooldown
+# Add a toggle tracking timestamp - moved to constants section
+# Constants for timing control
+TOGGLE_COOLDOWN = 1.0  # seconds
 
 
 async def toggle_listening():
-    """Toggle the listening state for the bot with cooldown protection"""
-    global is_listening, last_toggle_time, user_processing_enabled
+    """Toggle the listening state for the bot with cooldown protection.
 
+    Starts or stops audio processing in the connected Discord voice channel.
+    """
     current_time = time.time()
-    time_since_last = current_time - last_toggle_time
+    time_since_last = current_time - state.last_toggle_time
 
     # Check for rapid toggling (without debug spam)
-    if time_since_last < toggle_cooldown:
-        return True, "Toggle cooldown in effect", is_listening
+    if time_since_last < TOGGLE_COOLDOWN:
+        return True, "Toggle cooldown in effect", state.is_listening
 
     # Update last toggle time
-    last_toggle_time = current_time
+    state.last_toggle_time = current_time
 
     try:
-        if not connected_channel:
+        if state.connected_channel is None or not hasattr(state.connected_channel, 'guild'):
             return False, "Not connected to a voice channel", False
 
-        guild_id = connected_channel.guild.id
+        guild_id = state.connected_channel.guild.id
 
-        if guild_id not in voice_clients:
+        if guild_id not in state.voice_clients:
             return False, "Voice client not found", False
 
-        voice_client = voice_clients[guild_id]
-
-        # Toggle listening
+        voice_client = state.voice_clients[guild_id]        # Toggle listening
         try:
-            if is_listening:
-                success, message = await translator.stop_listening(voice_client)
+            if state.is_listening:
+                success, message = await state.translator.stop_listening(voice_client)
                 if success:
-                    is_listening = False
+                    state.is_listening = False
             else:
                 # CRITICAL FIX: Create a fresh copy of the processing settings
                 string_user_processing_enabled = {}
-                for user_id, enabled in user_processing_enabled.items():
+                for user_id, enabled in state.user_processing_enabled.items():
                     string_user_processing_enabled[str(user_id)] = enabled
 
                 # Set in the translator
-                translator.user_processing_enabled = string_user_processing_enabled.copy()
-                success, message = await translator.start_listening(voice_client)
+                state.translator.user_processing_enabled = string_user_processing_enabled.copy()
+                success, message = await state.translator.start_listening(voice_client)
 
                 if success:
-                    is_listening = True
-                    logger.info(
-                        f"Active user processing settings: {string_user_processing_enabled}")
+                    state.is_listening = True
+                    logger.info("Active user processing settings: %s",
+                                string_user_processing_enabled)
 
-        except Exception as e:
-            logger.info(f"Error in translator methods: {e}")
-            return False, f"Error in translator: {e}", is_listening
+        except (OSError, RuntimeError, ValueError) as e:
+            logger.info("Error in translator methods: %s", e)
+            return False, f"Error in translator: {e}", state.is_listening
 
         # Notify all clients of the change
         for connection in active_connections:
             await connection.send_json({
                 "type": "listen_status",
-                "is_listening": is_listening
+                "is_listening": state.is_listening
             })
 
-        return success, message, is_listening
-    except Exception as e:
-        logger.info(f"Error in toggle_listening: {e}")
-        return False, f"Error toggling listening: {e}", is_listening
+        return success, message, state.is_listening
+    except (OSError, RuntimeError, ValueError) as e:
+        logger.info("Error in toggle_listening: %s", e)
+        return False, f"Error toggling listening: {e}", state.is_listening
 
 
 async def leave_voice_channel():
-    global connected_channel, connected_users, is_listening
+    """Disconnect the bot from the current Discord voice channel and clean up state.
+
+    Stops listening, disconnects the voice client, and notifies all frontend clients.
+    """
 
     try:
-        if not connected_channel:
+        if state.connected_channel is None or not hasattr(state.connected_channel, 'guild'):
             return False, "Not connected to any voice channel"
 
-        guild_id = connected_channel.guild.id
+        guild_id = state.connected_channel.guild.id
 
         # Store channel info for logging before we clear it
-        channel_name = connected_channel.name
-        guild_name = connected_channel.guild.name
-
+        channel_name = getattr(state.connected_channel, 'name', 'Unknown')
         # CRITICAL FIX: Stop listening BEFORE disconnecting voice client
-        if is_listening and guild_id in voice_clients:
+        guild_name = getattr(
+            getattr(state.connected_channel, 'guild', None), 'name', 'Unknown')
+        if state.is_listening and guild_id in state.voice_clients:
             try:
-                await translator.stop_listening(voice_clients[guild_id])
-                logger.info(f"Stopped listening before leaving channel")
-            except Exception as e:
+                await state.translator.stop_listening(state.voice_clients[guild_id])
+                logger.info("Stopped listening before leaving channel")
+            except (OSError, RuntimeError, ValueError) as e:
                 logger.info(
-                    f"Error stopping listening during disconnect: {str(e)}")
+                    "Error stopping listening during disconnect: %s", str(e))
 
         # Always reset listening state when leaving channel
-        if is_listening:
-            is_listening = False
-            logger.info(f"Reset is_listening state to False")
+        if state.is_listening:
+            state.is_listening = False
+            logger.info("Reset is_listening state to False")
 
-        if guild_id in voice_clients:
-            await voice_clients[guild_id].disconnect()
-            del voice_clients[guild_id]
+        if guild_id in state.voice_clients:
+            await state.voice_clients[guild_id].disconnect()
+            del state.voice_clients[guild_id]
 
         # Log successful disconnection
         logger.info(
-            f"Disconnected from voice channel '{channel_name}' in server '{guild_name}'")
+            "Disconnected from voice channel '%s' in server '%s'", channel_name, guild_name)
 
-        connected_channel = None
-        connected_users = []
+        state.connected_channel = None
+        state.connected_users = []
 
         # Notify clients of updated (empty) user list
         for connection in active_connections:
             await connection.send_json({
                 "type": "users_update",
                 "users": [],
-                "enabled_states": user_processing_enabled
+                "enabled_states": state.user_processing_enabled
             })
 
         # CRITICAL FIX: Notify all clients that listening has stopped
@@ -421,21 +452,23 @@ async def leave_voice_channel():
             })
 
         return True, "Disconnected from voice channel"
-    except Exception as e:
+    except (OSError, RuntimeError, ValueError) as e:
         return False, f"Error leaving channel: {str(e)}"
 
 
 # Add voice state update event to track users joining/leaving
 @bot.event
 async def on_voice_state_update(member, before, after):
-    global connected_channel, connected_users, user_processing_enabled
+    """Track users joining or leaving the connected Discord voice channel.
 
+    Updates the user list and notifies frontend clients of user join/leave events.
+    """
     # Only process if we're connected to a channel
-    if not connected_channel:
+    if not state.connected_channel:
         return
 
     # Check if this event is relevant to our connected channel
-    our_channel_id = connected_channel.id
+    our_channel_id = state.connected_channel.id
     before_channel_id = before.channel.id if before.channel else None
     after_channel_id = after.channel.id if after.channel else None
 
@@ -449,18 +482,18 @@ async def on_voice_state_update(member, before, after):
             }
 
             # Add to our tracking
-            connected_users.append(user_data)
+            state.connected_users.append(user_data)
 
             # Initialize processing state
-            if user_data["id"] not in user_processing_enabled:
-                user_processing_enabled[user_data["id"]] = True
+            if user_data["id"] not in state.user_processing_enabled:
+                state.user_processing_enabled[user_data["id"]] = True
 
             # Notify clients
             for connection in active_connections:
                 await connection.send_json({
                     "type": "user_joined",
                     "user": user_data,
-                    "enabled": user_processing_enabled.get(user_data["id"], True)
+                    "enabled": state.user_processing_enabled.get(user_data["id"], True)
                 })
 
     # User left our channel
@@ -468,8 +501,8 @@ async def on_voice_state_update(member, before, after):
         if member.id != bot.user.id:  # Ignore bot itself
             # Remove from our tracking
             user_id = str(member.id)
-            connected_users = [
-                u for u in connected_users if u["id"] != user_id]
+            state.connected_users = [
+                u for u in state.connected_users if u["id"] != user_id]
 
             # Notify clients
             for connection in active_connections:
@@ -484,8 +517,11 @@ app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
 
 
 async def join_voice_channel(channel_id):
+    """Connect the bot to a specified Discord voice channel and set up audio processing.
+
+    Handles switching channels, user state, and notifies frontend clients of changes.
+    """
     try:
-        global connected_channel, connected_users, user_processing_enabled, is_listening
         channel = bot.get_channel(channel_id)
 
         if not channel:
@@ -494,52 +530,46 @@ async def join_voice_channel(channel_id):
         if not isinstance(channel, discord.VoiceChannel):
             # Check if already connected to a voice channel
             return False, "The specified channel is not a voice channel"
-        if connected_channel:
-            # Get the guild ID of the current connected channel
-            current_guild_id = connected_channel.guild.id
+        if state.connected_channel is not None and hasattr(state.connected_channel, 'guild'):
+            current_guild_id = state.connected_channel.guild.id
 
-            if current_guild_id in voice_clients:
-                # CRITICAL FIX: Stop listening BEFORE disconnecting when switching channels
-                if is_listening:
+            # CRITICAL FIX: Stop listening BEFORE disconnecting when switching channels
+            if current_guild_id in state.voice_clients:
+                if state.is_listening:
                     try:
-                        await translator.stop_listening(voice_clients[current_guild_id])
+                        await state.translator.stop_listening(state.voice_clients[current_guild_id])
                         logger.info(
-                            f"Stopped listening before switching channels")
-                    except Exception as e:
+                            "Stopped listening before switching channels")
+                    except (OSError, RuntimeError, ValueError) as e:
                         logger.info(
-                            f"Error stopping listening during channel switch: {str(e)}")
-
+                            "Error stopping listening during channel switch: %s", str(e))
                     # Reset listening state
-                    is_listening = False
+                    state.is_listening = False
                     logger.info(
-                        f"Reset is_listening state to False during channel switch")
-
-                    # Notify clients that listening has stopped
+                        "Reset is_listening state to False during channel switch")
                     for connection in active_connections:
                         await connection.send_json({
                             "type": "listen_status",
                             "is_listening": False
                         })
-
                 # Disconnect from the current voice channel
-                await voice_clients[current_guild_id].disconnect()
-                del voice_clients[current_guild_id]
-                logger.info(
-                    f"Disconnected from voice channel '{connected_channel.name}' in server '{connected_channel.guild.name}'")
-                connected_channel = None
+                await state.voice_clients[current_guild_id].disconnect()
+                del state.voice_clients[current_guild_id]
+                logger.info("Disconnected from voice channel '%s' in server '%s'",
+                            getattr(state.connected_channel,
+                                    'name', 'Unknown'),
+                            getattr(getattr(state.connected_channel, 'guild', None),
+                                    'name', 'Unknown'))
+                state.connected_channel = None
 
         # Connect to the new voice channel
         voice_client = await channel.connect()
-        voice_clients[channel.guild.id] = voice_client
-        connected_channel = channel
-
-        # Log successful connection with channel and guild info
-        logger.info(
-            f"Connected to voice channel '{channel.name}' in server '{channel.guild.name}'")
+        state.voice_clients[channel.guild.id] = voice_client
+        state.connected_channel = channel
 
         # Update connected users list - exclude bot
         # No need to call fetch_members, just use the cached members
-        connected_users = []
+        state.connected_users = []
         for member in channel.members:
             if member.id != bot.user.id:
                 member_data = {
@@ -547,28 +577,26 @@ async def join_voice_channel(channel_id):
                     "name": member.display_name,
                     "avatar": str(member.avatar.url) if member.avatar else None
                 }
-                connected_users.append(member_data)
+                state.connected_users.append(member_data)
 
                 # Initialize processing state if not already set
-                if member_data["id"] not in user_processing_enabled:
-                    user_processing_enabled[member_data["id"]] = True
+                if member_data["id"] not in state.user_processing_enabled:
+                    state.user_processing_enabled[member_data["id"]] = True
 
-        logger.info(
-            f"Connected users: {[user['name'] for user in connected_users]}")
+        logger.info("Connected users: %s", [
+                    user['name'] for user in state.connected_users])
 
         # Notify clients of updated user list
         for connection in active_connections:
             await connection.send_json({
                 "type": "users_update",
-                "users": connected_users,
-                "enabled_states": user_processing_enabled
-            })
-
-        # Set up the translator to process audio
-        translator.setup_voice_receiver(voice_client)
+                "users": state.connected_users,
+                "enabled_states": state.user_processing_enabled
+            })        # Set up the translator to process audio
+        state.translator.setup_voice_receiver(voice_client)
 
         return True, f"Connected to {channel.name}"
-    except Exception as e:
+    except (OSError, RuntimeError, ValueError) as e:
         return False, f"Error joining channel: {str(e)}"
 
 

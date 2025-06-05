@@ -1,51 +1,68 @@
-# discord-audio-pipe
-[![GitHub Workflow Status](https://github.com/QiCuiHub/discord-audio-pipe/workflows/CI/badge.svg)](https://github.com/QiCuiHub/discord-audio-pipe/actions?query=workflow%3ACI)
-[![GitHub release (latest by date)](https://img.shields.io/github/v/release/QiCuiHub/discord-audio-pipe)](https://github.com/QiCuiHub/discord-audio-pipe/releases/latest)
+# 🏛️ Historical Development Branch
 
-Simple program to send stereo audio (microphone, stereo mix, virtual audio cable, etc) into a discord bot.
+## ⚠️ **IMPORTANT NOTICE**
 
-You can download the latest release [**here**](https://github.com/QiCuiHub/discord-audio-pipe/releases)
-- If you are using the source code, install the dependencies and start the program using `main.pyw`
-- The `.exe` does not require python or dependencies
+**This branch contains historical code for development reference only.**
 
-## Setting up a Bot account
-1. Follow the steps [**here**](https://docs.pycord.dev/en/master/discord.html) to setup and invite a discord bot
-2. To link the program to your bot, create a file ``token.txt`` in the same directory as the `.exe` / `main.pyw` and save the bot token inside
+### 👉 **For Active Development & Usage:**
+**Please use the `main` branch instead.**
 
-## Dependencies
-Requires Python 3.8+. Install dependencies by running `pip3 install -r requirements.txt`
+The `main` branch contains:
+- ✅ **Optimized dependencies** (streamlined requirements.txt)
+- ✅ **Production-ready code**
+- ✅ **Up-to-date documentation**
+- ✅ **Latest bug fixes and improvements**
 
-In some cases PortAudio and xcb libraries may be missing on linux. On Ubuntu they can be installed with
+---
+
+## 📚 **Purpose of This Branch**
+
+This branch serves as:
+- 📜 **Historical reference** for development decisions
+- 🔍 **Code archaeology** for understanding project evolution
+- 🛠️ **Development sandbox** for experimental features
+- 📋 **Legacy code preservation** before major refactoring
+
+---
+
+## 🚀 **Quick Start (Use Main Branch)**
+
+```bash
+# Clone the repository
+git clone https://github.com/reyespinr/piano-bot-translator.git
+cd piano-bot-translator
+
+# Switch to main branch (recommended)
+git checkout main
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run the bot
+python server.py
 ```
-    $ sudo apt-get install libportaudio2
-    $ sudo apt-get install libxcb-xinerama0
-```
-macOS requires PortAudio and Opus libraries
-```
-    $ brew install portaudio --HEAD
-    $ brew install opus
-```
 
-## CLI
-Running the `.exe` / `main.pyw` without any arguments will start the graphical interface. Alternatively, discord-audio-pipe can be run from the command line and contains some tools to query system audio devices and accessible channels.
-```
-usage: main.pyw [-h] [-t TOKEN] [-v] [-c CHANNEL] [-d DEVICE] [-D] [-C]
+---
 
-Discord Audio Pipe
+## 🏗️ **Development History**
 
-optional arguments:
-  -h, --help            show this help message and exit
-  -t TOKEN, --token TOKEN
-                        The token for the bot
-  -v, --verbose         Enable verbose logging
+This branch may contain:
+- Experimental features
+- Unoptimized dependencies
+- Legacy code patterns
+- Development artifacts
+- Testing configurations
 
-Command Line Mode:
-  -c CHANNEL, --channel CHANNEL
-                        The channel to connect to as an id
-  -d DEVICE, --device DEVICE
-                        The device to listen from as an index
+**For the cleanest, most efficient version of the Piano Bot Translator, always use the `main` branch.**
 
-Queries:
-  -D, --devices         Query compatible audio devices
-  -C, --channels        Query servers and channels (requires token)
-```
+---
+
+## 📞 **Need Help?**
+
+- 🐛 **Issues**: Report on the main branch
+- 💡 **Features**: Develop against the main branch
+- 📖 **Documentation**: Refer to main branch README.md
+
+---
+
+*This README was created to prevent confusion and ensure users get the best experience with the Piano Bot Translator project.*

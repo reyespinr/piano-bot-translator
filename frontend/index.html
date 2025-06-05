@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Piano Bot Translator</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <div class="container">
+        <h1>🎹 Piano Bot Translator</h1>
+
+        <div class="status-bar">
+            <div>
+                <span>Bot Status: </span>
+                <span id="bot-status" class="status-offline">Offline</span>
+            </div>
+            <div id="connection-status" class="connection-offline">Not connected to any channel</div>
+        </div>
+
+        <div class="content">
+            <div class="control-panel">
+                <div class="controls">
+                    <label for="server-select">Server</label>
+                    <select id="server-select">
+                        <option value="">Select a server</option>
+                    </select>
+
+                    <label for="channel-select">Channel</label>
+                    <select id="channel-select" disabled>
+                        <option value="">Select a channel</option>
+                    </select>
+
+                    <div class="button-row">
+                        <button id="join-btn" class="btn primary" disabled>Join</button>
+                        <button id="leave-btn" class="btn secondary" disabled>Leave</button>
+                    </div>
+
+                    <div class="button-row">
+                        <button id="listen-btn" class="btn primary" disabled>Listen</button>
+                        <button id="clear-btn" class="btn secondary" disabled>Clear</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="transcription-container">
+                <h2>Transcription</h2>
+                <div id="transcription-box" class="message-container"></div>
+
+                <h2>Translation</h2>
+                <div id="translations-container" class="message-container"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+
+</html>

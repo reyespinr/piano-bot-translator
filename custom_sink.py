@@ -131,7 +131,7 @@ class RealTimeWaveSink(WaveSink):
         **kwargs: Additional keyword arguments to pass to the parent class.
     """
 
-    def __init__(self, *args, pause_threshold=1.0, event_loop=None, num_workers=3, **kwargs):
+    def __init__(self, *args, pause_threshold=1.0, event_loop=None, num_workers=6, **kwargs):
         super().__init__(*args, **kwargs)
 
         # Initialize the parent class reference
@@ -748,7 +748,7 @@ class RealTimeWaveSink(WaveSink):
 
         # Add a small delay to let threads terminate naturally
         logger.debug("Waiting for threads to terminate naturally")
-        time.sleep(0.2)
+        time.sleep(0.5)  # Increased from 0.2 to 0.5 for more threads
 
         # Clear the queue to unblock any waiting threads
         try:
@@ -765,10 +765,27 @@ class RealTimeWaveSink(WaveSink):
         except (ValueError, RuntimeError) as e:
             logger.error("Error clearing queue: %s", e)
 
-        logger.info("Cleaning up sink resources - %d workers stopped",
-                    self.workers.num_workers)
-        # Print thread status
+        # Wait for all worker threads to finish with timeout
+        logger.debug("Waiting for worker threads to join...")
         for i, worker in enumerate(self.workers.workers):
-            logger.debug("Worker %d alive: %s", i, worker.is_alive())
+            try:
+                worker.join(timeout=2.0)  # Wait up to 2 seconds per thread
+                if worker.is_alive():
+                    logger.warning(
+                        "Worker thread %d still alive after join timeout", i+1)
+                else:
+                    logger.debug("Worker thread %d successfully joined", i+1)
+            except RuntimeError as e:
+                logger.error("Error joining worker thread %d: %s", i+1, e)
 
-        # Worker threads are daemon threads and will terminate when the program exits
+        logger.info("Cleaning up sink resources - %d workers processed",
+                    self.workers.num_workers)
+
+        # Print final thread status
+        alive_threads = sum(
+            1 for worker in self.workers.workers if worker.is_alive())
+        if alive_threads > 0:
+            logger.warning(
+                "%d worker threads still alive after cleanup", alive_threads)
+        else:
+            logger.info("All worker threads successfully terminated")

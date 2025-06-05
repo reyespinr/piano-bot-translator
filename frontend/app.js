@@ -1,538 +1,639 @@
-// Get references to key UI elements
-const serverSelect = document.getElementById('server-select');
-const channelSelect = document.getElementById('channel-select');
-const joinButton = document.getElementById('join-btn');
-const leaveButton = document.getElementById('leave-btn');
-const listenButton = document.getElementById('listen-btn');
-const clearButton = document.getElementById('clear-btn');
-const connectionStatus = document.getElementById('connection-status');
-const transcriptionBox = document.getElementById('transcription-box');
-const translationsContainer = document.getElementById('translations-container');
+/**
+ * Piano Bot Translator - Production Frontend
+ * Optimized WebSocket client with auto-reconnect, error handling, and performance optimizations
+ */
 
-// Global state
-let socket;
-let selectedGuild = null;
-let selectedChannel = null;
-let isListening = false;
+class PianoBotClient {
+    constructor() {
+        this.socket = null;
+        this.reconnectAttempts = 0;
+        this.maxReconnectAttempts = 5;
+        this.reconnectDelay = 1000;
+        this.isConnected = false;
+        this.messageQueue = [];
+        
+        // UI state
+        this.selectedGuild = null;
+        this.selectedChannel = null;
+        this.isListening = false;
+        this.lastSpeakers = { transcription: null, translation: null };
+        
+        this.initializeElements();
+        this.attachEventListeners();
+        this.connect();
+    }
 
-// Message tracking for continuity
-let lastSpeakers = {
-    transcription: null,
-    translation: null
-};
-
-// Connect to WebSocket
-function connectWebSocket() {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/ws`;
-    
-    socket = new WebSocket(wsUrl);
-    
-    socket.onopen = function() {
-        console.log('WebSocket connection established');
-        sendCommand('get_guilds');
-    };
-    
-    socket.onmessage = function(event) {
-        const message = JSON.parse(event.data);
-        handleWebSocketMessage(message);
-    };
-    
-    socket.onclose = function() {
-        console.log('WebSocket connection closed');
-        setTimeout(connectWebSocket, 3000);
-    };
-}
-
-// Send command to server
-function sendCommand(command, data = {}) {
-    if (socket && socket.readyState === WebSocket.OPEN) {
-        const payload = {
-            command: command,
-            ...data
+    initializeElements() {
+        // Cache DOM elements
+        this.elements = {
+            serverSelect: document.getElementById('server-select'),
+            channelSelect: document.getElementById('channel-select'),
+            joinButton: document.getElementById('join-btn'),
+            leaveButton: document.getElementById('leave-btn'),
+            listenButton: document.getElementById('listen-btn'),
+            clearButton: document.getElementById('clear-btn'),
+            connectionStatus: document.getElementById('connection-status'),
+            transcriptionBox: document.getElementById('transcription-box'),
+            translationsContainer: document.getElementById('translations-container'),
+            botStatus: document.getElementById('bot-status'),
+            userListContainer: null // Will be created dynamically
         };
-        socket.send(JSON.stringify(payload));
-    } else {
-        console.error('WebSocket not connected');
-    }
-}
 
-// Handle messages from server
-function handleWebSocketMessage(message) {
-    console.log('Received message:', message);
-    
-    switch (message.type) {        case 'status':
-            // Handle initial status
-            if (message.connected_channel) {
-                connectionStatus.textContent = `Connected to: ${message.connected_channel}`;
-                joinButton.disabled = true;
-                leaveButton.disabled = false;
-                listenButton.disabled = false;
-                clearButton.disabled = false;
-                
-                // Show any existing translations
-                if (message.translations && message.translations.length) {
-                    translationsContainer.innerHTML = '';
-                    message.translations.forEach(t => {
-                        displayMessage(t, translationsContainer);
-                    });
-                }
-            }
-            
-            // CRITICAL FIX: Handle initial listening state
-            if (typeof message.is_listening !== 'undefined') {
-                console.log('🎧 Initial listen state received:', message.is_listening);
-                updateListenButtonState(message.is_listening);
-            }
-            
-            // CRITICAL FIX: Handle initial user list
-            if (message.users) {
-                console.log('👥 Initial user list received:', message.users);
-                updateUserList(message.users, message.enabled_states);
-            }
-            break;
-            
-        case 'guilds':
-            // Populate server dropdown
-            serverSelect.innerHTML = '<option value="">Select a server</option>';
-            message.guilds.forEach(guild => {
-                const option = document.createElement('option');
-                option.value = guild.id;
-                option.textContent = guild.name;
-                serverSelect.appendChild(option);
-            });
-            break;
-            
-        case 'channels':
-            // Populate channel dropdown
-            channelSelect.innerHTML = '<option value="">Select a channel</option>';
-            message.channels.forEach(channel => {
-                const option = document.createElement('option');
-                option.value = channel.id;
-                option.textContent = channel.name;
-                channelSelect.appendChild(option);
-            });
-            break;
-            
-        case 'response':
-            // Handle command responses
-            handleCommandResponse(message);
-            break;
-            
-        case 'bot_status':
-            // Update bot status indicator
-            const statusElement = document.getElementById('bot-status');
-            if (statusElement) {
-                if (message.ready) {
-                    statusElement.textContent = 'Online';
-                    statusElement.className = 'status-online';
-                } else {
-                    statusElement.textContent = 'Offline';
-                    statusElement.className = 'status-offline';
-                }
-            }
-            break;
-            
-        case 'transcription':
-            // Display transcription with enhanced logging
-            console.log('🎙️ Transcription received:', message.data);
-            if (message.data) {
-                displayMessageWithContinuity(transcriptionBox, message.data, 'transcription');
-            } else {
-                console.error('Received empty transcription data');
-            }
-            break;
-            
-        case 'translation':
-            // Display translation with enhanced logging
-            console.log('🌐 Translation received:', message.data);
-            if (message.data) {
-                displayMessageWithContinuity(translationsContainer, message.data, 'translation');
-            } else {
-                console.error('Received empty translation data');
-            }
-            break;
-            
-        case 'listen_status':
-            // Update listen button state
-            console.log('🎧 Listen status update received:', message.is_listening);
-            updateListenButtonState(message.is_listening);
-            break;
-            
-        case 'users_update':
-            // Log and update the user list when we receive user updates
-            console.log('Users update received:', message.users);
-            if (message.users) {
-                updateUserList(message.users, message.enabled_states);
-            }
-            break;
-            
-        case 'user_joined':
-            // Handle when a new user joins the channel
-            console.log('User joined:', message.user);
-            if (message.user) {
-                addUserToList(message.user, message.enabled);
-            }
-            break;
-            
-        case 'user_left':
-            // Handle when a user leaves the channel
-            console.log('User left:', message.user_id);
-            if (message.user_id) {
-                removeUserFromList(message.user_id);
-            }
-            break;
-    }
-}
-
-// Handle responses to commands
-function handleCommandResponse(message) {
-    if (message.command === 'join_channel') {
-        if (message.success) {
-            connectionStatus.textContent = `Connected to: ${selectedChannel}`;
-            joinButton.disabled = true;
-            leaveButton.disabled = false;
-            listenButton.disabled = false;
-            clearButton.disabled = false;
-            
-            // Update bot status to online when successfully connected
-            const statusElement = document.getElementById('bot-status');
-            if (statusElement) {
-                statusElement.textContent = 'Online';
-                statusElement.className = 'status-online';
-            }
-        } else {
-            connectionStatus.textContent = `Error: ${message.message}`;
-        }
-    } else if (message.command === 'leave_channel') {
-        if (message.success) {
-            connectionStatus.textContent = 'Not connected to any channel';
-            joinButton.disabled = false;
-            leaveButton.disabled = true;
-            listenButton.disabled = true;
-            clearButton.disabled = true;
-            
-            // Update bot status to offline when disconnected
-            const statusElement = document.getElementById('bot-status');
-            if (statusElement) {
-                statusElement.textContent = 'Offline';
-                statusElement.className = 'status-offline';
-            }
-        }
-    } else if (message.command === 'toggle_listen') {
-        console.log('Toggle listen response:', message);
-        updateListenButtonState(message.is_listening);
-    }
-}
-
-// Display a message in a container with improved logging
-function displayMessage(messageData, container) {
-    if (!messageData || !container) {
-        console.error('Invalid message data or container:', messageData, container);
-        return;
-    }
-    
-    // Create message element
-    const div = document.createElement('div');
-    div.className = 'message';
-    div.innerHTML = `<strong>${messageData.user}:</strong> ${messageData.text}`;
-    
-    // Add to container
-    container.appendChild(div);
-    
-    // Scroll to the bottom
-    container.scrollTop = container.scrollHeight;
-    
-    // Log for debugging
-    console.log(`Message displayed in ${container.id}: ${messageData.user}: ${messageData.text}`);
-}
-
-// Add this new function for displaying messages with continuity
-function displayMessageWithContinuity(container, data, messageType) {
-    const user = data.user;
-    const text = data.text;
-    const userId = data.user_id;
-    
-    // Get the appropriate last speaker
-    const lastSpeakerKey = messageType === 'transcription' ? 'transcription' : 'translation';
-    const lastSpeaker = lastSpeakers[lastSpeakerKey];
-    
-    // Get existing messages in container
-    const messages = container.querySelectorAll('.message');
-    const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
-    
-    // Debugging
-    console.log(`Processing ${messageType} from ${user} (${userId})`);
-    console.log(`Last speaker was: ${lastSpeaker}`);
-    
-    if (lastSpeaker === user && lastMessage) {
-        // Same speaker, append to existing message
-        console.log("Combining with previous message");
-        const contentSpan = lastMessage.querySelector('.message-content');
+        // Validate required elements exist
+        const requiredElements = ['serverSelect', 'channelSelect', 'joinButton', 'leaveButton', 
+                                'listenButton', 'clearButton', 'connectionStatus', 
+                                'transcriptionBox', 'translationsContainer'];
         
-        // Check if content span exists
-        if (contentSpan) {
-            contentSpan.textContent += " " + text.trim();
-            console.log(`Combined message: ${contentSpan.textContent}`);
-        } else {
-            console.error("Error: No content span found in last message");
-            // Fallback: create new message
-            createNewMessage(container, user, text);
+        for (const elementName of requiredElements) {
+            if (!this.elements[elementName]) {
+                console.error(`Required element not found: ${elementName}`);
+            }
         }
-    } else {
-        // Different speaker, create new message
-        console.log("➕ Creating new message");
-        createNewMessage(container, user, text);
     }
-    
-    // Update last speaker
-    lastSpeakers[lastSpeakerKey] = user;
-    
-    // Scroll to bottom
-    container.scrollTop = container.scrollHeight;
-    
-    console.log(`Message displayed in ${container.id}: ${user}: ${text}`);
-}
 
-// Helper function to create new message element
-function createNewMessage(container, user, text) {
-    const messageElement = document.createElement('div');
-    messageElement.className = 'message';
-    
-    const userElement = document.createElement('strong');
-    userElement.textContent = user + ": ";
-    
-    const contentElement = document.createElement('span');
-    contentElement.className = 'message-content';
-    contentElement.textContent = text.trim();
-    
-    messageElement.appendChild(userElement);
-    messageElement.appendChild(contentElement);
-    container.appendChild(messageElement);
-}
-
-// Update listen button state with visual feedback
-function updateListenButtonState(listening) {
-    console.log(`Updating listen button state: ${listening}`);
-    
-    // Update global state
-    isListening = listening;
-    
-    // Update button appearance
-    if (listening) {
-        listenButton.textContent = 'Stop';
-        listenButton.classList.add('listening');
-        listenButton.style.backgroundColor = '#F04747';
-        listenButton.style.color = 'white';
-        listenButton.style.fontWeight = 'bold';
-    } else {
-        listenButton.textContent = 'Listen';
-        listenButton.classList.remove('listening');
-        listenButton.style.backgroundColor = '';
-        listenButton.style.color = '';
-        listenButton.style.fontWeight = '';
-    }
-    
-    // Re-enable the button
-    listenButton.disabled = false;
-}
-
-// Function to update the user list display
-function updateUserList(users, enabledStates) {
-    // Get or create the user list container
-    const userListContainer = document.getElementById('user-list-container') || createUserListContainer();
-    userListContainer.innerHTML = '';
-    
-    // Add heading
-    const heading = document.createElement('h3');
-    heading.textContent = 'Connected Users';
-    heading.className = 'user-list-heading';
-    userListContainer.appendChild(heading);
-    
-    // Create user entries
-    if (users && users.length > 0) {
-        users.forEach(user => {
-            const userItem = createUserToggleItem(user, enabledStates ? enabledStates[user.id] : true);
-            userListContainer.appendChild(userItem);
+    attachEventListeners() {
+        // Server selection
+        this.elements.serverSelect.addEventListener('change', (e) => {
+            this.selectedGuild = e.target.value;
+            this.handleServerChange();
         });
-    } else {
-        // Show a message if no users
+
+        // Channel selection
+        this.elements.channelSelect.addEventListener('change', (e) => {
+            this.selectedChannel = e.target.options[e.target.selectedIndex].text;
+            this.elements.joinButton.disabled = !e.target.value;
+        });
+
+        // Button events
+        this.elements.joinButton.addEventListener('click', () => this.joinChannel());
+        this.elements.leaveButton.addEventListener('click', () => this.leaveChannel());
+        this.elements.listenButton.addEventListener('click', () => this.toggleListening());
+        this.elements.clearButton.addEventListener('click', () => this.clearMessages());
+
+        // Handle page visibility changes
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                this.pauseUpdates();
+            } else {
+                this.resumeUpdates();
+            }
+        });
+
+        // Handle window beforeunload
+        window.addEventListener('beforeunload', () => {
+            if (this.socket) {
+                this.socket.close();
+            }
+        });
+    }
+
+    connect() {
+        try {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws`;
+            
+            this.socket = new WebSocket(wsUrl);
+            this.setupWebSocketHandlers();
+            
+        } catch (error) {
+            console.error('WebSocket connection failed:', error);
+            this.handleConnectionError();
+        }
+    }
+
+    setupWebSocketHandlers() {
+        this.socket.onopen = () => {
+            console.log('WebSocket connected');
+            this.isConnected = true;
+            this.reconnectAttempts = 0;
+            this.updateConnectionStatus('Connected', 'online');
+            
+            // Process queued messages
+            this.processMessageQueue();
+            
+            // Request initial data
+            this.sendCommand('get_guilds');
+        };
+
+        this.socket.onmessage = (event) => {
+            try {
+                const message = JSON.parse(event.data);
+                this.handleMessage(message);
+            } catch (error) {
+                console.error('Failed to parse WebSocket message:', error);
+            }
+        };
+
+        this.socket.onclose = (event) => {
+            console.log('WebSocket disconnected:', event.code, event.reason);
+            this.isConnected = false;
+            this.updateConnectionStatus('Disconnected', 'offline');
+            
+            if (!event.wasClean && this.reconnectAttempts < this.maxReconnectAttempts) {
+                this.scheduleReconnect();
+            }
+        };
+
+        this.socket.onerror = (error) => {
+            console.error('WebSocket error:', error);
+            this.handleConnectionError();
+        };
+    }
+
+    scheduleReconnect() {
+        const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts);
+        this.reconnectAttempts++;
+        
+        console.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
+        this.updateConnectionStatus(`Reconnecting... (${this.reconnectAttempts}/${this.maxReconnectAttempts})`, 'offline');
+        
+        setTimeout(() => {
+            if (!this.isConnected) {
+                this.connect();
+            }
+        }, delay);
+    }
+
+    handleConnectionError() {
+        this.isConnected = false;
+        this.updateConnectionStatus('Connection Error', 'offline');
+        this.disableControls();
+    }
+
+    sendCommand(command, data = {}) {
+        const payload = { command, ...data };
+        
+        if (this.isConnected && this.socket.readyState === WebSocket.OPEN) {
+            try {
+                this.socket.send(JSON.stringify(payload));
+            } catch (error) {
+                console.error('Failed to send command:', error);
+                this.messageQueue.push(payload);
+            }
+        } else {
+            this.messageQueue.push(payload);
+        }
+    }
+
+    processMessageQueue() {
+        while (this.messageQueue.length > 0) {
+            const message = this.messageQueue.shift();
+            try {
+                this.socket.send(JSON.stringify(message));
+            } catch (error) {
+                console.error('Failed to send queued message:', error);
+                break;
+            }
+        }
+    }
+
+    handleMessage(message) {
+        switch (message.type) {
+            case 'status':
+                this.handleStatusMessage(message);
+                break;
+            case 'guilds':
+                this.populateServers(message.guilds);
+                break;
+            case 'channels':
+                this.populateChannels(message.channels);
+                break;
+            case 'response':
+                this.handleCommandResponse(message);
+                break;
+            case 'bot_status':
+                this.updateBotStatus(message.ready);
+                break;
+            case 'transcription':
+                this.handleTranscription(message.data);
+                break;
+            case 'translation':
+                this.handleTranslation(message.data);
+                break;
+            case 'listen_status':
+                this.updateListenButton(message.is_listening);
+                break;
+            case 'users_update':
+                this.updateUserList(message.users, message.enabled_states);
+                break;
+            case 'user_joined':
+                this.addUser(message.user, message.enabled);
+                break;
+            case 'user_left':
+                this.removeUser(message.user_id);
+                break;
+            case 'user_toggle':
+                this.updateUserToggle(message.user_id, message.enabled);
+                break;
+            default:
+                console.warn('Unknown message type:', message.type);
+        }
+    }
+
+    handleStatusMessage(message) {
+        if (message.connected_channel) {
+            this.updateConnectionStatus(`Connected to: ${message.connected_channel}`, 'online');
+            this.enableChannelControls();
+        }
+        
+        if (typeof message.is_listening !== 'undefined') {
+            this.updateListenButton(message.is_listening);
+        }
+        
+        if (message.users) {
+            this.updateUserList(message.users, message.enabled_states);
+        }
+        
+        if (message.translations?.length) {
+            this.batchDisplayMessages(message.translations, 'translation');
+        }
+    }
+
+    populateServers(guilds) {
+        const select = this.elements.serverSelect;
+        select.innerHTML = '<option value="">Select a server</option>';
+        
+        guilds.forEach(guild => {
+            const option = document.createElement('option');
+            option.value = guild.id;
+            option.textContent = guild.name;
+            select.appendChild(option);
+        });
+    }
+
+    populateChannels(channels) {
+        const select = this.elements.channelSelect;
+        select.innerHTML = '<option value="">Select a channel</option>';
+        select.disabled = false;
+        
+        channels.forEach(channel => {
+            const option = document.createElement('option');
+            option.value = channel.id;
+            option.textContent = channel.name;
+            select.appendChild(option);
+        });
+    }
+
+    handleServerChange() {
+        if (this.selectedGuild) {
+            this.sendCommand('get_channels', { guild_id: this.selectedGuild });
+        } else {
+            this.elements.channelSelect.innerHTML = '<option value="">Select a channel</option>';
+            this.elements.channelSelect.disabled = true;
+            this.elements.joinButton.disabled = true;
+        }
+    }
+
+    joinChannel() {
+        const channelId = this.elements.channelSelect.value;
+        if (channelId) {
+            this.setButtonLoading(this.elements.joinButton, 'Joining...');
+            this.sendCommand('join_channel', { channel_id: channelId });
+        }
+    }
+
+    leaveChannel() {
+        this.setButtonLoading(this.elements.leaveButton, 'Leaving...');
+        this.sendCommand('leave_channel');
+    }
+
+    toggleListening() {
+        if (this.elements.listenButton.disabled) return;
+        
+        const button = this.elements.listenButton;
+        if (this.isListening) {
+            this.setButtonLoading(button, 'Stopping...', 'danger');
+        } else {
+            this.setButtonLoading(button, 'Starting...', 'primary');
+        }
+        
+        this.sendCommand('toggle_listen');
+    }
+
+    clearMessages() {
+        this.elements.transcriptionBox.innerHTML = '';
+        this.elements.translationsContainer.innerHTML = '';
+        // CRITICAL: Reset last speakers when clearing
+        this.lastSpeakers = { transcription: null, translation: null };
+    }
+
+    handleCommandResponse(message) {
+        const { command, success, message: responseMessage } = message;
+        
+        switch (command) {
+            case 'join_channel':
+                this.resetButtonLoading(this.elements.joinButton, 'Join');
+                if (success) {
+                    this.enableChannelControls();
+                    this.updateConnectionStatus(`Connected to: ${this.selectedChannel}`, 'online');
+                } else {
+                    this.updateConnectionStatus(`Error: ${responseMessage}`, 'error');
+                }
+                break;
+            case 'leave_channel':
+                this.resetButtonLoading(this.elements.leaveButton, 'Leave');
+                if (success) {
+                    this.disableChannelControls();
+                    this.updateConnectionStatus('Not connected to any channel', 'offline');
+                    this.clearUserList();
+                }
+                break;
+            case 'toggle_listen':
+                this.updateListenButton(message.is_listening);
+                break;
+        }
+    }
+
+    batchDisplayMessages(messages, type) {
+        const container = type === 'transcription' ? 
+            this.elements.transcriptionBox : this.elements.translationsContainer;
+        
+        messages.forEach(data => {
+            this.displayMessageWithContinuity(container, data, type);
+        });
+        
+        this.scrollToBottom(container);
+        this.trimMessages(container);
+    }
+
+    displayMessageWithContinuity(container, data, type) {
+        const user = data.user;
+        const text = data.text;
+        const userId = String(data.user_id); // Ensure userId is always a string
+        
+        // Get the appropriate last speaker
+        const lastSpeaker = this.lastSpeakers[type];
+        
+        // Get existing messages in container
+        const lastMessage = container.lastElementChild;
+        
+        // Check if we can combine with the last message
+        // Must be same user AND the last message in the container AND same user ID
+        if (lastSpeaker === user && lastMessage && String(lastMessage.dataset.userId) === userId) {
+            // Same speaker, append to existing message
+            const contentSpan = lastMessage.querySelector('.message-content');
+            if (contentSpan) {
+                // Add a space before appending the new text
+                contentSpan.textContent += ' ' + text.trim();
+                this.scrollToBottom(container);
+                return;
+            }
+        }
+        
+        // Different speaker or no previous message, create new message
+        this.createNewMessage(container, user, text, userId);
+        
+        // Update last speaker for this message type AFTER creating the message
+        this.lastSpeakers[type] = user;
+        
+        this.scrollToBottom(container);
+    }
+
+    createNewMessage(container, user, text, userId) {
+        const messageElement = document.createElement('div');
+        messageElement.className = 'message';
+        messageElement.dataset.userId = userId;
+        
+        const userElement = document.createElement('strong');
+        userElement.textContent = user + ': ';
+        
+        const contentElement = document.createElement('span');
+        contentElement.className = 'message-content';
+        contentElement.textContent = text.trim();
+        
+        messageElement.appendChild(userElement);
+        messageElement.appendChild(contentElement);
+        container.appendChild(messageElement);
+    }
+
+    updateListenButton(listening) {
+        this.isListening = listening;
+        const button = this.elements.listenButton;
+        
+        if (listening) {
+            button.textContent = 'Stop';
+            button.className = 'btn danger';
+        } else {
+            button.textContent = 'Listen';
+            button.className = 'btn primary';
+        }
+        
+        button.disabled = false;
+    }
+
+    updateBotStatus(ready) {
+        if (this.elements.botStatus) {
+            this.elements.botStatus.textContent = ready ? 'Online' : 'Offline';
+            this.elements.botStatus.className = ready ? 'status-online' : 'status-offline';
+        }
+    }
+
+    updateConnectionStatus(message, type) {
+        this.elements.connectionStatus.textContent = message;
+        this.elements.connectionStatus.className = `connection-${type}`;
+    }
+
+    setButtonLoading(button, text, className = 'primary') {
+        button.textContent = text;
+        button.disabled = true;
+        button.className = `btn ${className} loading`;
+    }
+
+    resetButtonLoading(button, text, className = 'primary') {
+        button.textContent = text;
+        button.disabled = false;
+        button.className = `btn ${className}`;
+    }
+
+    enableChannelControls() {
+        this.elements.joinButton.disabled = true;
+        this.elements.leaveButton.disabled = false;
+        this.elements.listenButton.disabled = false;
+        this.elements.clearButton.disabled = false;
+    }
+
+    disableChannelControls() {
+        this.elements.joinButton.disabled = false;
+        this.elements.leaveButton.disabled = true;
+        this.elements.listenButton.disabled = true;
+        this.elements.clearButton.disabled = true;
+        this.updateListenButton(false);
+    }
+
+    disableControls() {
+        Object.values(this.elements).forEach(element => {
+            if (element?.disabled !== undefined) {
+                element.disabled = true;
+            }
+        });
+    }
+
+    updateUserList(users, enabledStates) {
+        const container = this.getUserListContainer();
+        container.innerHTML = '<h3 class="user-list-heading">Connected Users</h3>';
+        
+        if (users?.length) {
+            users.forEach(user => {
+                const userElement = this.createUserElement(user, enabledStates?.[user.id] ?? true);
+                container.appendChild(userElement);
+            });
+        } else {
+            const noUsers = document.createElement('p');
+            noUsers.className = 'no-users';
+            noUsers.textContent = 'No users connected';
+            container.appendChild(noUsers);
+        }
+    }
+
+    createUserElement(user, enabled) {
+        const userItem = document.createElement('div');
+        userItem.className = 'user-toggle-item';
+        userItem.id = `user-${user.id}`;
+        
+        const userName = document.createElement('div');
+        userName.className = 'user-name';
+        userName.textContent = user.name;
+        
+        const toggleSwitch = this.createToggleSwitch(user.id, enabled);
+        
+        userItem.appendChild(userName);
+        userItem.appendChild(toggleSwitch);
+        
+        return userItem;
+    }
+
+    createToggleSwitch(userId, enabled) {
+        const label = document.createElement('label');
+        label.className = 'toggle-switch';
+        
+        const input = document.createElement('input');
+        input.type = 'checkbox';
+        input.checked = enabled;
+        input.dataset.userId = userId;
+        input.addEventListener('change', (e) => {
+            this.toggleUser(userId, e.target.checked);
+        });
+        
+        const slider = document.createElement('span');
+        slider.className = 'toggle-slider';
+        
+        label.appendChild(input);
+        label.appendChild(slider);
+        
+        return label;
+    }
+
+    toggleUser(userId, enabled) {
+        this.sendCommand('toggle_user', { user_id: userId, enabled });
+    }
+
+    addUser(user, enabled) {
+        const container = this.getUserListContainer();
+        const noUsersMsg = container.querySelector('.no-users');
+        if (noUsersMsg) noUsersMsg.remove();
+        
+        if (!document.getElementById(`user-${user.id}`)) {
+            const userElement = this.createUserElement(user, enabled);
+            container.appendChild(userElement);
+        }
+    }
+
+    removeUser(userId) {
+        const userElement = document.getElementById(`user-${userId}`);
+        userElement?.remove();
+        
+        // Show "no users" message if list is empty
+        const container = this.getUserListContainer();
+        if (!container.querySelector('.user-toggle-item')) {
+            const noUsers = document.createElement('p');
+            noUsers.className = 'no-users';
+            noUsers.textContent = 'No users connected';
+            container.appendChild(noUsers);
+        }
+    }
+
+    updateUserToggle(userId, enabled) {
+        const userElement = document.getElementById(`user-${userId}`);
+        const toggle = userElement?.querySelector('input[type="checkbox"]');
+        if (toggle) {
+            toggle.checked = enabled;
+        }
+    }
+
+    clearUserList() {
+        const container = this.getUserListContainer();
+        container.innerHTML = '<h3 class="user-list-heading">Connected Users</h3>';
         const noUsers = document.createElement('p');
-        noUsers.textContent = 'No users connected';
         noUsers.className = 'no-users';
-        userListContainer.appendChild(noUsers);
+        noUsers.textContent = 'No users connected';
+        container.appendChild(noUsers);
     }
-}
 
-// Helper function to create a user toggle item
-function createUserToggleItem(user, enabled = true) {
-    const userItem = document.createElement('div');
-    userItem.className = 'user-toggle-item';
-    userItem.id = `user-${user.id}`;
-    
-    // User name/avatar
-    const userName = document.createElement('div');
-    userName.className = 'user-name';
-    userName.textContent = user.name;
-    
-    // Toggle switch
-    const toggleSwitch = document.createElement('label');
-    toggleSwitch.className = 'toggle-switch';
-    
-    const toggleInput = document.createElement('input');
-    toggleInput.type = 'checkbox';
-    toggleInput.checked = enabled;
-    toggleInput.setAttribute('data-user-id', user.id);
-    toggleInput.addEventListener('change', function() {
-        toggleUserProcessing(user.id, this.checked);
-    });
-    
-    const toggleSlider = document.createElement('span');
-    toggleSlider.className = 'toggle-slider';
-    
-    toggleSwitch.appendChild(toggleInput);
-    toggleSwitch.appendChild(toggleSlider);
-    
-    userItem.appendChild(userName);
-    userItem.appendChild(toggleSwitch);
-    
-    return userItem;
-}
+    getUserListContainer() {
+        if (!this.elements.userListContainer) {
+            this.elements.userListContainer = this.createUserListContainer();
+        }
+        return this.elements.userListContainer;
+    }
 
-// Function to create the user list container if it doesn't exist
-function createUserListContainer() {
-    // Check if container already exists
-    let container = document.getElementById('user-list-container');
-    if (container) return container;
-    
-    // Create container
-    container = document.createElement('div');
-    container.id = 'user-list-container';
-    container.className = 'user-list-container panel';
-    
-    // Find the main content container
-    const contentContainer = document.querySelector('.container');
-    if (contentContainer) {
-        // Create the content layout if it doesn't exist yet
-        let contentLayout = document.querySelector('.content');
-        if (!contentLayout) {
-            contentLayout = document.createElement('div');
-            contentLayout.className = 'content';
-            contentContainer.appendChild(contentLayout);
+    createUserListContainer() {
+        let container = document.getElementById('user-list-container');
+        if (container) return container;
+        
+        container = document.createElement('div');
+        container.id = 'user-list-container';
+        container.className = 'user-list-container';
+        
+        const controlPanel = document.querySelector('.control-panel');
+        if (controlPanel) {
+            controlPanel.appendChild(container);
         }
         
-        // Create left column for controls if it doesn't exist
-        let leftColumn = document.querySelector('.control-panel');
-        if (!leftColumn) {
-            leftColumn = document.createElement('div');
-            leftColumn.className = 'control-panel';
-            contentLayout.appendChild(leftColumn);
+        return container;
+    }
+
+    pauseUpdates() {
+        // Remove buffer timer clearing since we're not using it anymore
+        // if (this.batchUpdateTimer) {
+        //     cancelAnimationFrame(this.batchUpdateTimer);
+        //     this.batchUpdateTimer = null;
+        // }
+    }
+
+    resumeUpdates() {
+        // Remove buffer processing since we're not using it anymore
+        // this.processBatchUpdates();
+    }
+
+    handleTranscription(data) {
+        if (data) {
+            // Display immediately instead of buffering for transcriptions
+            this.displayMessageWithContinuity(this.elements.transcriptionBox, data, 'transcription');
+            this.trimMessages(this.elements.transcriptionBox);
         }
-        
-        // Append user list to the left column - under controls
-        leftColumn.appendChild(container);
-    } else {
-        // Fallback - add to body
-        document.body.appendChild(container);
     }
-    
-    return container;
-}
 
-// Function to toggle user processing
-function toggleUserProcessing(userId, enabled) {
-    console.log(`Toggling user ${userId} processing to ${enabled}`);
-    sendCommand('toggle_user', {
-        user_id: userId,
-        enabled: enabled
-    });
-}
+    handleTranslation(data) {
+        if (data) {
+            // Display immediately instead of buffering for translations
+            this.displayMessageWithContinuity(this.elements.translationsContainer, data, 'translation');
+            this.trimMessages(this.elements.translationsContainer);
+        }
+    }
 
-// Function to add a user to the list
-function addUserToList(user, enabled = true) {
-    const userListContainer = document.getElementById('user-list-container') || createUserListContainer();
-    
-    // Check if user already exists
-    if (document.getElementById(`user-${user.id}`)) return;
-    
-    // Add user
-    const userItem = createUserToggleItem(user, enabled);
-    userListContainer.appendChild(userItem);
-}
+    scrollToBottom(container) {
+        container.scrollTop = container.scrollHeight;
+    }
 
-// Function to remove a user from the list
-function removeUserFromList(userId) {
-    const userItem = document.getElementById(`user-${userId}`);
-    if (userItem) {
-        userItem.remove();
+    trimMessages(container) {
+        const messages = container.children;
+        while (messages.length > 100) {
+            container.removeChild(messages[0]);
+        }
     }
 }
 
-// Event Listeners
-serverSelect.addEventListener('change', function() {
-    selectedGuild = this.value;
-    if (selectedGuild) {
-        sendCommand('get_channels', { guild_id: selectedGuild });
-    } else {
-        channelSelect.innerHTML = '<option value="">Select a channel</option>';
-        channelSelect.disabled = true;
-    }
-});
-
-channelSelect.addEventListener('change', function() {
-    selectedChannel = this.options[this.selectedIndex].text;
-    joinButton.disabled = !this.value;
-});
-
-joinButton.addEventListener('click', function() {
-    if (channelSelect.value) {
-        sendCommand('join_channel', { channel_id: channelSelect.value });
-    }
-});
-
-leaveButton.addEventListener('click', function() {
-    sendCommand('leave_channel');
-});
-
-listenButton.addEventListener('click', function() {
-    if (listenButton.disabled) return;
-    
-    // Temporarily disable the button
-    listenButton.disabled = true;
-    
-    // Provide immediate visual feedback with correct messaging
-    if (!isListening) {
-        // Going from not listening to listening
-        listenButton.textContent = 'Starting...';
-        listenButton.style.backgroundColor = '#F04747';
-        listenButton.style.color = 'white';
-    } else {
-        // Going from listening to not listening
-        listenButton.textContent = 'Stopping...';
-        // Keep the red styling during the "Stopping..." phase
-        listenButton.style.backgroundColor = '#F04747';
-        listenButton.style.color = 'white';
-    }
-    
-    // Send the command
-    sendCommand('toggle_listen');
-});
-
-clearButton.addEventListener('click', function() {
-    transcriptionBox.innerHTML = '';
-    translationsContainer.innerHTML = '';
-});
-
-// Initialize the app on page load
-document.addEventListener('DOMContentLoaded', function() {
-    // Make sure message containers exist
-    if (!transcriptionBox) {
-        console.error('Transcription box not found!');
-    }
-    if (!translationsContainer) {
-        console.error('Translations container not found!');
-    }
-    
-    // Connect to WebSocket
-    connectWebSocket();
+// Initialize the application
+document.addEventListener('DOMContentLoaded', () => {
+    window.pianoBotClient = new PianoBotClient();
 });

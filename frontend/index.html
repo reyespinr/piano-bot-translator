@@ -17,7 +17,7 @@
                 <span>Bot Status: </span>
                 <span id="bot-status" class="status-offline">Offline</span>
             </div>
-            <div id="connection-status">Not connected to any channel</div>
+            <div id="connection-status" class="connection-offline">Not connected to any channel</div>
         </div>
 
         <div class="content">
@@ -29,7 +29,7 @@
                     </select>
 
                     <label for="channel-select">Channel</label>
-                    <select id="channel-select">
+                    <select id="channel-select" disabled>
                         <option value="">Select a channel</option>
                     </select>
 
@@ -43,86 +43,19 @@
                         <button id="clear-btn" class="btn secondary" disabled>Clear</button>
                     </div>
                 </div>
-
-                <!-- User list container will be inserted here by JS -->
-                <div id="user-list-container" class="user-list-container">
-                    <h3 class="user-list-heading">Connected Users</h3>
-                    <p class="no-users">No users connected</p>
-                </div>
             </div>
 
             <div class="transcription-container">
                 <h2>Transcription</h2>
-                <div id="transcription-box"></div>
+                <div id="transcription-box" class="message-container"></div>
 
                 <h2>Translation</h2>
-                <div id="translations-container"></div>
+                <div id="translations-container" class="message-container"></div>
             </div>
         </div>
     </div>
 
     <script src="app.js"></script>
-    <script>
-        // Message handling logic
-        function handleIncomingMessage(messageData, messageType) {
-            const container = messageType === 'transcription' ?
-                document.getElementById('transcription-box') :
-                document.getElementById('translations-container');
-
-            const user = messageData.user;
-            const text = messageData.text;
-
-            // Find if we have a previous message from this user
-            const userMessages = container.querySelectorAll(`.message[data-user="${user}"]`);
-            const lastUserMessage = userMessages.length > 0 ?
-                userMessages[userMessages.length - 1] : null;
-
-            if (lastUserMessage && lastUserMessage === container.lastElementChild) {
-                // Last message was from the same user, append text
-                const contentSpan = lastUserMessage.querySelector('.message-content');
-                contentSpan.textContent += " " + text;
-            } else {
-                // Create a new message element
-                const messageElement = document.createElement('div');
-                messageElement.className = 'message';
-                messageElement.setAttribute('data-user', user);
-
-                // Create user name element
-                const userElement = document.createElement('strong');
-                userElement.textContent = user + ": ";
-
-                // Create content element
-                const contentElement = document.createElement('span');
-                contentElement.className = 'message-content';
-                contentElement.textContent = text;
-
-                // Assemble and add to container
-                messageElement.appendChild(userElement);
-                messageElement.appendChild(contentElement);
-                container.appendChild(messageElement);
-            }
-
-            // Scroll to bottom
-            container.scrollTop = container.scrollHeight;
-        }
-
-        // Websocket message handler
-        socket.onmessage = function (event) {
-            const data = JSON.parse(event.data);
-
-            if (data.type === 'transcription') {
-                handleIncomingMessage(data.data, 'transcription');
-            } else if (data.type === 'translation') {
-                handleIncomingMessage(data.data, 'translation');
-            }
-
-            // ... rest of the handler for other message types ...
-        };
-
-        // Verify our message combining by adding this at the top of your script
-        console.log("Loading enhanced message continuity script");
-    </script>
-
 </body>
 
 </html>

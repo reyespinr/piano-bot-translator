@@ -380,3 +380,136 @@ input:checked+.toggle-slider:before {
         flex-direction: column;
     }
 }
+
+/* === Connection Status Styling === */
+.connection-online {
+    color: #43B581;
+    font-weight: 600;
+}
+
+.connection-offline {
+    color: #F04747;
+    font-weight: 600;
+}
+
+.connection-error {
+    color: #FF6B6B;
+    font-weight: 600;
+}
+
+/* === Loading States === */
+.btn.loading {
+    position: relative;
+    pointer-events: none;
+}
+
+.btn.loading::after {
+    content: '';
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    margin: auto;
+    border: 2px solid transparent;
+    border-top-color: #ffffff;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    right: 0;
+}
+
+@keyframes spin {
+    0% {
+        transform: rotate(0deg);
+    }
+
+    100% {
+        transform: rotate(360deg);
+    }
+}
+
+/* === Performance Optimizations === */
+.message-container {
+    contain: layout style paint;
+    will-change: scroll-position;
+}
+
+.message {
+    contain: layout style paint;
+    transform: translateZ(0);
+    /* Force GPU acceleration */
+}
+
+/* === Improved Scrolling Performance === */
+.message-container {
+    scroll-behavior: smooth;
+    -webkit-overflow-scrolling: touch;
+}
+
+/* === User List Optimizations === */
+.user-list-container {
+    contain: layout style;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+/* === Error States === */
+.error-message {
+    background-color: #F04747;
+    color: white;
+    padding: 8px 12px;
+    border-radius: 4px;
+    margin: 4px 0;
+    font-weight: 500;
+}
+
+.warning-message {
+    background-color: #FAA61A;
+    color: white;
+    padding: 8px 12px;
+    border-radius: 4px;
+    margin: 4px 0;
+    font-weight: 500;
+}
+
+/* === Responsive Improvements === */
+@media (max-width: 768px) {
+    .content {
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .control-panel {
+        max-width: none;
+        order: 2;
+    }
+
+    .transcription-container {
+        order: 1;
+    }
+
+    #transcription-box,
+    #translations-container {
+        height: 200px;
+    }
+}
+
+/* === Accessibility Improvements === */
+.btn:focus {
+    outline: 2px solid #7289DA;
+    outline-offset: 2px;
+}
+
+.toggle-switch input:focus+.toggle-slider {
+    box-shadow: 0 0 0 2px #7289DA;
+}
+
+/* === High DPI Support === */
+@media (-webkit-min-device-pixel-ratio: 2),
+(min-resolution: 192dpi) {
+    .message {
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+    }
+}

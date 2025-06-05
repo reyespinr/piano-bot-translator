@@ -488,6 +488,8 @@ async def on_voice_state_update(member, before, after):
             if user_data["id"] not in state.user_processing_enabled:
                 state.user_processing_enabled[user_data["id"]] = True
 
+            logger.info("User '%s' joined voice channel", member.display_name)
+
             # Notify clients
             for connection in active_connections:
                 await connection.send_json({
@@ -503,6 +505,12 @@ async def on_voice_state_update(member, before, after):
             user_id = str(member.id)
             state.connected_users = [
                 u for u in state.connected_users if u["id"] != user_id]
+
+            # Remove user processing settings for users who left
+            if user_id in state.user_processing_enabled:
+                del state.user_processing_enabled[user_id]
+                logger.info(
+                    "User '%s' left voice channel, removed processing settings", member.display_name)
 
             # Notify clients
             for connection in active_connections:
@@ -528,8 +536,9 @@ async def join_voice_channel(channel_id):
             return False, f"Channel with ID {channel_id} not found"
 
         if not isinstance(channel, discord.VoiceChannel):
-            # Check if already connected to a voice channel
             return False, "The specified channel is not a voice channel"
+
+        # Check if already connected to a voice channel
         if state.connected_channel is not None and hasattr(state.connected_channel, 'guild'):
             current_guild_id = state.connected_channel.guild.id
 
@@ -558,8 +567,7 @@ async def join_voice_channel(channel_id):
                 logger.info("Disconnected from voice channel '%s' in server '%s'",
                             getattr(state.connected_channel,
                                     'name', 'Unknown'),
-                            getattr(getattr(state.connected_channel, 'guild', None),
-                                    'name', 'Unknown'))
+                            getattr(getattr(state.connected_channel, 'guild', None), 'name', 'Unknown'))
                 state.connected_channel = None
 
         # Connect to the new voice channel
@@ -567,9 +575,15 @@ async def join_voice_channel(channel_id):
         state.voice_clients[channel.guild.id] = voice_client
         state.connected_channel = channel
 
-        # Update connected users list - exclude bot
-        # No need to call fetch_members, just use the cached members
+        # Log successful connection
+        logger.info("Connected to voice channel '%s' in server '%s'",
+                    channel.name, channel.guild.name)
+
+        # Update connected users list - exclude bot and clear old user processing settings
         state.connected_users = []
+        # Clear user processing settings for users not in the new channel
+        current_user_ids = set()
+
         for member in channel.members:
             if member.id != bot.user.id:
                 member_data = {
@@ -578,13 +592,25 @@ async def join_voice_channel(channel_id):
                     "avatar": str(member.avatar.url) if member.avatar else None
                 }
                 state.connected_users.append(member_data)
+                current_user_ids.add(str(member.id))
 
                 # Initialize processing state if not already set
                 if member_data["id"] not in state.user_processing_enabled:
                     state.user_processing_enabled[member_data["id"]] = True
 
-        logger.info("Connected users: %s", [
-                    user['name'] for user in state.connected_users])
+        # Remove processing settings for users who are no longer in the channel
+        users_to_remove = []
+        for user_id in state.user_processing_enabled:
+            if user_id not in current_user_ids:
+                users_to_remove.append(user_id)
+
+        for user_id in users_to_remove:
+            del state.user_processing_enabled[user_id]
+            logger.debug(
+                "Removed user processing settings for user %s (no longer in channel)", user_id)
+
+        logger.info("Connected users: %s", [user['name']
+                    for user in state.connected_users])
 
         # Notify clients of updated user list
         for connection in active_connections:
@@ -592,7 +618,9 @@ async def join_voice_channel(channel_id):
                 "type": "users_update",
                 "users": state.connected_users,
                 "enabled_states": state.user_processing_enabled
-            })        # Set up the translator to process audio
+            })
+
+        # Set up the translator to process audio
         state.translator.setup_voice_receiver(voice_client)
 
         return True, f"Connected to {channel.name}"
@@ -602,4 +630,22 @@ async def join_voice_channel(channel_id):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+
+    # Try multiple ports to avoid permission issues
+    ports_to_try = [3000, 5000, 8080, 8888, 9000]
+
+    for port in ports_to_try:
+        try:
+            logger.info("Trying to start server on port %d...", port)
+            uvicorn.run("server:app", host="127.0.0.1", port=port, reload=True)
+            break
+        except OSError as e:
+            if "10013" in str(e) or "Address already in use" in str(e):
+                logger.info(
+                    "Port %d is not available, trying next port...", port)
+                continue
+            raise e
+    else:
+        logger.info("Could not start server on any of the attempted ports.")
+        logger.info(
+            "Try running as administrator or check your firewall settings.")

@@ -28,8 +28,8 @@ logger = get_logger(__name__)
 
 # Model reference (will be loaded on demand, not at import time)
 MODEL = None
-MODEL_NAME = "large-v3-turbo"
-# MODEL_NAME = "base"
+# MODEL_NAME = "large-v3-turbo"
+MODEL_NAME = "base"
 
 
 # Common hallucinations to filter out
@@ -40,6 +40,7 @@ COMMON_HALLUCINATIONS = {
 
 def _load_model_if_needed():
     """Lazy load the model only when needed - truly on-demand loading"""
+    # pylint: disable-next=global-statement
     global MODEL
     if MODEL is None:
         logger.info("Loading stable-ts %s model...", MODEL_NAME)

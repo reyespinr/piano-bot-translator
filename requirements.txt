@@ -1,5 +1,5 @@
 # Core Discord and voice processing
-discord.py[voice]==2.3.2
+py-cord==2.4.1  # Replace with your required version
 PyNaCl==1.4.0
 
 # Machine learning and transcription

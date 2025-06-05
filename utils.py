@@ -83,11 +83,11 @@ async def transcribe(audio_file_path):
 
     # Extract text and detected language
     transcribed_text = result.text if result.text else ""
-    detected_language = result.language if result.language else ""
-
     # Handle Austrian German misidentified as Icelandic
+    detected_language = result.language if result.language else ""
     if detected_language == "is":  # "is" is the language code for Icelandic
-        print("Detected Icelandic - likely Austrian German. Re-transcribing as German...")
+        logger.info(
+            "Detected Icelandic - likely Austrian German. Re-transcribing as German...")
         # Re-transcribe with German as forced language
         result = model.transcribe(
             audio_file_path,
@@ -102,7 +102,7 @@ async def transcribe(audio_file_path):
         )
         transcribed_text = result.text if result.text else ""
         detected_language = "de"  # Override detected language to German
-        print("Re-transcribed as German")
+        logger.info("Re-transcribed as German")
 
     # Apply additional confidence filtering as a safety net
     if hasattr(result, "segments") and result.segments:
@@ -114,14 +114,13 @@ async def transcribe(audio_file_path):
 
         # Apply our confidence thresholds if we have confidence data
         if confidences:
-            avg_log_prob = sum(confidences) / len(confidences)
-
             # General confidence threshold
+            avg_log_prob = sum(confidences) / len(confidences)
             confidence_threshold = -1.5
             if avg_log_prob < confidence_threshold:
-                print(
-                    f"Low confidence transcription rejected"
-                    f"({avg_log_prob:.2f}): '{transcribed_text}'")
+                logger.info(
+                    "Low confidence transcription rejected (%s): '%s'",
+                    f"{avg_log_prob:.2f}", transcribed_text)
                 return "", detected_language
 
             # Special case for common hallucinations
@@ -133,12 +132,12 @@ async def transcribe(audio_file_path):
                 # For these common short responses, require higher confidence
                 stricter_threshold = -0.5
                 if avg_log_prob < stricter_threshold:
-                    print(
-                        f"Short statement '{text}' rejected with confidence {avg_log_prob:.2f}")
+                    logger.info(
+                        "Short statement '%s' rejected with confidence %.2f", text, avg_log_prob)
                     return "", detected_language
 
-            print(
-                f"Transcription confidence: {avg_log_prob:.2f}, Language: {detected_language}")
+            logger.info(
+                "Transcription confidence: %.2f, Language: %s", avg_log_prob, detected_language)
 
     # Return both the text and detected language
     return transcribed_text, detected_language
@@ -193,8 +192,9 @@ async def should_translate(text, detected_language):
         # This simple heuristic checks for characters common in non-Latin alphabets
         non_ascii_ratio = len([c for c in text if ord(c) > 127]) / len(text)
         if non_ascii_ratio > 0.1:  # If more than 10% non-ASCII, translate anyway
-            print(
-                f"Detected mixed language content (non-ASCII ratio: {non_ascii_ratio:.2f})")
+            logger.info(
+                "Detected mixed language content (non-ASCII ratio: %.2f - translating)",
+                non_ascii_ratio)
             return True
         return False
 
@@ -241,7 +241,7 @@ async def warm_up_pipeline():
 
     This significantly reduces the delay for the first real transcription.
     """
-    print("Warming up transcription pipeline...")
+    logger.info("Warming up transcription pipeline...")
     try:
         # Create a dummy audio file
         dummy_file = create_dummy_audio_file()
@@ -253,6 +253,6 @@ async def warm_up_pipeline():
         if os.path.exists(dummy_file):
             os.remove(dummy_file)
 
-        print("Pipeline warm-up complete")
+        logger.info("Pipeline warm-up complete")
     except (IOError, FileNotFoundError, PermissionError, RuntimeError) as e:
-        print(f"Warm-up error (non-critical): {e}")
+        logger.error("Warm-up error (non-critical): %s", str(e))

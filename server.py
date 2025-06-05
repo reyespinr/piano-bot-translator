@@ -4,12 +4,11 @@ import asyncio
 import json
 import discord
 from discord import VoiceClient
-import os
 import time
 from typing import Dict, List
 from contextlib import asynccontextmanager
 from translator import VoiceTranslator
-import utils  # Import utils for create_dummy_audio_file and transcribe
+import utils
 from logging_config import get_logger
 
 # Initialize logger for this module
@@ -31,14 +30,8 @@ async def lifespan(app: FastAPI):
     # Initialize the translator
     translator = VoiceTranslator(broadcast_translation)
     await translator.load_models()
-
-    # Force model loading by performing a small transcription
-    logger.info("Initializing transcription pipeline...")
-    # Create a dummy audio file and transcribe it to load the model
-    temp_file = utils.create_dummy_audio_file()
-    await utils.transcribe(temp_file)
-    os.remove(temp_file)
-    logger.info("Transcription pipeline ready")
+    # Warm up the pipeline
+    await utils.warm_up_pipeline()
 
     # Get token from token.txt file
     try:
@@ -354,11 +347,11 @@ async def toggle_listening():
 
                 if success:
                     is_listening = True
-                    print(
+                    logger.info(
                         f"Active user processing settings: {string_user_processing_enabled}")
 
         except Exception as e:
-            print(f"Error in translator methods: {e}")
+            logger.info(f"Error in translator methods: {e}")
             return False, f"Error in translator: {e}", is_listening
 
         # Notify all clients of the change
@@ -370,7 +363,7 @@ async def toggle_listening():
 
         return success, message, is_listening
     except Exception as e:
-        print(f"Error in toggle_listening: {e}")
+        logger.info(f"Error in toggle_listening: {e}")
         return False, f"Error toggling listening: {e}", is_listening
 
 
@@ -391,14 +384,15 @@ async def leave_voice_channel():
         if is_listening and guild_id in voice_clients:
             try:
                 await translator.stop_listening(voice_clients[guild_id])
-                print(f"Stopped listening before leaving channel")
+                logger.info(f"Stopped listening before leaving channel")
             except Exception as e:
-                print(f"Error stopping listening during disconnect: {str(e)}")
+                logger.info(
+                    f"Error stopping listening during disconnect: {str(e)}")
 
         # Always reset listening state when leaving channel
         if is_listening:
             is_listening = False
-            print(f"Reset is_listening state to False")
+            logger.info(f"Reset is_listening state to False")
 
         if guild_id in voice_clients:
             await voice_clients[guild_id].disconnect()
@@ -509,14 +503,16 @@ async def join_voice_channel(channel_id):
                 if is_listening:
                     try:
                         await translator.stop_listening(voice_clients[current_guild_id])
-                        print(f"Stopped listening before switching channels")
+                        logger.info(
+                            f"Stopped listening before switching channels")
                     except Exception as e:
-                        print(
+                        logger.info(
                             f"Error stopping listening during channel switch: {str(e)}")
 
                     # Reset listening state
                     is_listening = False
-                    print(f"Reset is_listening state to False during channel switch")
+                    logger.info(
+                        f"Reset is_listening state to False during channel switch")
 
                     # Notify clients that listening has stopped
                     for connection in active_connections:

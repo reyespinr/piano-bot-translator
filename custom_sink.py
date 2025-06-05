@@ -21,6 +21,7 @@ import queue
 import threading
 import gc
 import subprocess
+import traceback
 from dataclasses import dataclass
 from queue import Queue
 import numpy as np
@@ -584,9 +585,13 @@ class RealTimeWaveSink(WaveSink):
                     # Even if GUI update fails, try the translation callback directly
                     if hasattr(self, 'translation_callback') and self.translation_callback:
                         try:
-                            await self.translation_callback(user, transcribed_text, message_type="transcription")
+                            await self.translation_callback(user,
+                                                            transcribed_text,
+                                                            message_type="transcription")
                             if needs_translation and translated_text != transcribed_text:
-                                await self.translation_callback(user, translated_text, message_type="translation")
+                                await self.translation_callback(user,
+                                                                translated_text,
+                                                                message_type="translation")
                             logger.debug("Transcription sent via callback")
                         except Exception as cb_error:
                             logger.error(
@@ -666,13 +671,19 @@ class RealTimeWaveSink(WaveSink):
             if hasattr(self, 'translation_callback') and self.translation_callback:
                 try:
                     # Send transcription first
-                    await self.translation_callback(user, transcribed_text, message_type="transcription")
+                    await self.translation_callback(user,
+                                                    transcribed_text,
+                                                    message_type="transcription")
 
                     # Then send translation if different
                     if transcribed_text != translated_text:
-                        await self.translation_callback(user, translated_text, message_type="translation")
+                        await self.translation_callback(user,
+                                                        translated_text,
+                                                        message_type="translation")
                     else:
-                        await self.translation_callback(user, translated_text, message_type="translation")
+                        await self.translation_callback(user,
+                                                        translated_text,
+                                                        message_type="translation")
 
                     return
                 except TypeError as e:
@@ -686,7 +697,6 @@ class RealTimeWaveSink(WaveSink):
 
         except (AttributeError, TypeError, ValueError) as e:
             logger.error(f"Error updating display for user {user}: {e}")
-            import traceback
             logger.debug(f"TEXT-FLOW: Traceback: {traceback.format_exc()}")
 
     def _check_inactive_speakers(self):

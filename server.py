@@ -510,7 +510,8 @@ async def on_voice_state_update(member, before, after):
             if user_id in state.user_processing_enabled:
                 del state.user_processing_enabled[user_id]
                 logger.info(
-                    "User '%s' left voice channel, removed processing settings", member.display_name)
+                    "User '%s' left voice channel, removed processing settings",
+                    member.display_name)
 
             # Notify clients
             for connection in active_connections:
@@ -567,7 +568,8 @@ async def join_voice_channel(channel_id):
                 logger.info("Disconnected from voice channel '%s' in server '%s'",
                             getattr(state.connected_channel,
                                     'name', 'Unknown'),
-                            getattr(getattr(state.connected_channel, 'guild', None), 'name', 'Unknown'))
+                            getattr(getattr(state.connected_channel, 'guild', None),
+                                    'name', 'Unknown'))
                 state.connected_channel = None
 
         # Connect to the new voice channel

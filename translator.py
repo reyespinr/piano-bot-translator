@@ -49,21 +49,53 @@ class VoiceTranslator:
         self.model_loaded = False
 
     async def load_models(self):
-        """Verify model loading capabilities without loading the model"""
+        """Verify model loading capabilities and warm up models with timeout protection"""
         try:
             logger.info("Loading translation models...")
             # Check if we have the transcribe function available
             if hasattr(utils, "transcribe"):
-                # Trigger the warm-up process which loads both models
-                await utils.warm_up_pipeline()
-                self.model_loaded = True
-                logger.info("✅ Models loaded and warmed up successfully")
-                return True
-            logger.warning("Model loading mechanism not found")
-            return False
-        except (AttributeError, ImportError) as e:
-            logger.error(
-                "Error verifying model loading capability: %s", str(e))
+                # CRITICAL FIX: Only load models, don't do warmup here
+                # The warmup will be done separately to avoid double warmup
+                try:
+                    # Just load the models without warmup first
+                    utils._load_models_if_needed()
+                    self.model_loaded = True
+                    logger.info("✅ Models loaded successfully")
+
+                    # Now do the warmup separately
+                    logger.info("Starting model warmup...")
+                    warmup_task = asyncio.create_task(utils.warm_up_pipeline())
+
+                    try:
+                        # Wait up to 2 minutes for complete warmup
+                        await asyncio.wait_for(warmup_task, timeout=120.0)
+                        logger.info("✅ Model warmup completed successfully")
+                        return True
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "⚠️ Model warmup timed out but models are loaded - continuing")
+                        return True
+
+                except Exception as warmup_error:
+                    logger.warning(
+                        "Warmup error but models are loaded: %s", str(warmup_error))
+                    return True
+            else:
+                logger.warning("Model loading mechanism not found")
+                return False
+        except Exception as e:
+            logger.error("Error during model loading: %s", str(e))
+            # Check if models were actually loaded despite the error
+            if hasattr(utils, '_load_models_if_needed'):
+                try:
+                    utils._load_models_if_needed()
+                    self.model_loaded = True
+                    logger.info(
+                        "✅ Models loaded successfully despite warmup error")
+                    return True
+                except Exception as load_error:
+                    logger.error("Failed to load models: %s", str(load_error))
+                    return False
             return False
 
     def setup_voice_receiver(self, voice_client):
@@ -234,23 +266,50 @@ class VoiceTranslator:
     async def process_audio_callback(self, user_id, audio_file, message_type=None):
         """Process audio data and generate translations"""
         try:
+            logger.debug(
+                "🔄 process_audio_callback called for user %s with message_type: %s", user_id, message_type)
+
             # If we're called with a message_type, it's a direct text message,
             # not an audio file
             if message_type is not None:
                 # Here audio_file is actually the text content when
                 # message_type is provided
                 text_content = audio_file
+                logger.info("📝 Received %s for user %s: %s",
+                            message_type, user_id, text_content)
 
                 # Forward to translation callback
                 if self.translation_callback:
                     try:
-                        await self.translation_callback(
-                            user_id, text_content, message_type=message_type)
+                        logger.debug(
+                            "🔄 Forwarding to translation_callback for user %s", user_id)
+                        await self.translation_callback(user_id, text_content, message_type=message_type)
+                        logger.info(
+                            "✅ Successfully forwarded %s to translation_callback for user %s: %s", message_type, user_id, text_content)
                     except (TypeError, AttributeError, ValueError) as cb_error:
                         logger.error(
-                            "Error in translation callback: %s", str(cb_error))
+                            "❌ Error in translation callback: %s", str(cb_error))
+                        import traceback
+                        logger.debug(
+                            "Translation callback error traceback: %s", traceback.format_exc())
+
+                        # Try fallback without message_type
+                        try:
+                            logger.debug(
+                                "🔄 Trying fallback callback without message_type")
+                            await self.translation_callback(user_id, text_content)
+                            logger.info(
+                                "✅ Fallback callback succeeded for user %s", user_id)
+                        except Exception as fallback_error:
+                            logger.error(
+                                "❌ Fallback callback failed: %s", str(fallback_error))
+                else:
+                    logger.error("❌ No translation_callback available!")
                 return
 
+            # If we get here, it's an audio file processing request (legacy path)
+            logger.warning(
+                "⚠️ Legacy audio file processing path called - this should not happen in current design")
             try:
                 # Get current queue size from sink if available for smart routing
                 current_queue_size = 0
@@ -272,13 +331,10 @@ class VoiceTranslator:
                 # Create transcription message
                 logger.info("Sending transcription for user %s: %s",
                             user_id, transcribed_text)
-                await self.translation_callback(user_id,
-                                                transcribed_text,
-                                                message_type="transcription")
+                await self.translation_callback(user_id, transcribed_text, message_type="transcription")
 
                 # Determine if translation is needed
-                needs_translation = await utils.should_translate(transcribed_text,
-                                                                 detected_language)
+                needs_translation = await utils.should_translate(transcribed_text, detected_language)
 
                 if needs_translation:
                     translated_text = await utils.translate(transcribed_text)
@@ -287,9 +343,7 @@ class VoiceTranslator:
                     # Send the translation
                     logger.info("Sending translation for user %s: %s",
                                 user_id, translated_text)
-                    await self.translation_callback(user_id,
-                                                    translated_text,
-                                                    message_type="translation")
+                    await self.translation_callback(user_id, translated_text, message_type="translation")
                 else:
                     # Skip translation for English
                     logger.debug(
@@ -297,17 +351,19 @@ class VoiceTranslator:
                     # For English, use the same text for translation display
                     logger.info("Sending direct text for user %s: %s",
                                 user_id, transcribed_text)
-                    await self.translation_callback(user_id,
-                                                    transcribed_text,
-                                                    message_type="translation")
+                    await self.translation_callback(user_id, transcribed_text, message_type="translation")
             finally:
                 # CRITICAL: Always delete the file when done with it
                 await self._force_delete_file(audio_file)
 
         except (OSError, RuntimeError, ValueError) as e:
             logger.error("Error in process_audio_callback: %s", str(e))
+            import traceback
+            logger.debug("Process audio callback error traceback: %s",
+                         traceback.format_exc())
             # Make sure to clean up even if exception occurs
-            await self._force_delete_file(audio_file)
+            if message_type is None:  # Only try to delete if it was an audio file
+                await self._force_delete_file(audio_file)
 
     async def _force_delete_file(self, file_path):
         """Forcefully delete a file with multiple retries."""

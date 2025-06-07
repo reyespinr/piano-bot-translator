@@ -40,10 +40,10 @@ COMMON_HALLUCINATIONS = {
 
 # Dual model architecture - load both models
 MODEL_ACCURATE = None  # large-v3-turbo for quality
-MODEL_FAST = None      # base for speed
+MODEL_FAST_POOL = []   # Pool of 3 base models for speed
 MODEL_ACCURATE_NAME = "large-v3-turbo"
-# MODEL_FAST_NAME = "large-v3-turbo"
 MODEL_FAST_NAME = "base"
+MODEL_FAST_POOL_SIZE = 3  # Number of fast models in the pool
 
 # Model usage tracking with thread-safe locks
 MODEL_USAGE_STATS = {
@@ -55,14 +55,16 @@ MODEL_USAGE_STATS = {
     "concurrent_requests": 0,  # Track concurrent requests
     "active_transcriptions": set(),  # Track active transcription IDs
     "stats_lock": threading.Lock(),  # Thread-safe access
-    "accurate_model_lock": threading.Lock(),  # ADDED: Lock for accurate model
-    "fast_model_lock": threading.Lock()  # ADDED: Lock for fast model
+    "accurate_model_lock": threading.Lock(),  # Lock for accurate model
+    "fast_model_locks": [],  # List of locks for each fast model
+    "fast_model_busy_states": [],  # Track which fast models are busy
+    "fast_model_usage_count": []  # Track usage count per fast model
 }
 
 
 def _load_models_if_needed():
-    """Lazy load both models only when needed - smart dual model loading"""
-    global MODEL_ACCURATE, MODEL_FAST
+    """Lazy load accurate model and fast model pool only when needed"""
+    global MODEL_ACCURATE, MODEL_FAST_POOL
 
     if MODEL_ACCURATE is None:
         logger.info("Loading ACCURATE model: %s...", MODEL_ACCURATE_NAME)
@@ -70,12 +72,83 @@ def _load_models_if_needed():
             MODEL_ACCURATE_NAME, device="cuda")
         logger.info("Accurate model loaded successfully!")
 
-    if MODEL_FAST is None:
-        logger.info("Loading FAST model: %s...", MODEL_FAST_NAME)
-        MODEL_FAST = stable_whisper.load_model(MODEL_FAST_NAME, device="cuda")
-        logger.info("Fast model loaded successfully!")
+    if len(MODEL_FAST_POOL) == 0:
+        logger.info("Loading FAST model pool: %d x %s...",
+                    MODEL_FAST_POOL_SIZE, MODEL_FAST_NAME)
 
-    return MODEL_ACCURATE, MODEL_FAST
+        # Initialize tracking structures
+        MODEL_USAGE_STATS["fast_model_locks"] = []
+        MODEL_USAGE_STATS["fast_model_busy_states"] = []
+        MODEL_USAGE_STATS["fast_model_usage_count"] = []
+
+        for i in range(MODEL_FAST_POOL_SIZE):
+            logger.info("Loading fast model %d/%d...",
+                        i+1, MODEL_FAST_POOL_SIZE)
+            fast_model = stable_whisper.load_model(
+                MODEL_FAST_NAME, device="cuda")
+            MODEL_FAST_POOL.append(fast_model)
+
+            # Create individual lock and tracking for each model
+            MODEL_USAGE_STATS["fast_model_locks"].append(threading.Lock())
+            MODEL_USAGE_STATS["fast_model_busy_states"].append(False)
+            MODEL_USAGE_STATS["fast_model_usage_count"].append(0)
+
+            logger.info("Fast model %d/%d loaded successfully!",
+                        i+1, MODEL_FAST_POOL_SIZE)
+
+        logger.info(
+            "🚀 Fast model pool loaded: %d models ready for parallel processing", MODEL_FAST_POOL_SIZE)
+
+    return MODEL_ACCURATE, MODEL_FAST_POOL
+
+
+def _get_available_fast_model():
+    """Get the least busy available fast model from the pool"""
+    with MODEL_USAGE_STATS["stats_lock"]:
+        # Find the least used available model
+        available_models = []
+        for i, (busy, usage_count) in enumerate(zip(
+            MODEL_USAGE_STATS["fast_model_busy_states"],
+            MODEL_USAGE_STATS["fast_model_usage_count"]
+        )):
+            if not busy:
+                available_models.append((i, usage_count))
+
+        if available_models:
+            # Sort by usage count to get the least used model
+            available_models.sort(key=lambda x: x[1])
+            model_index = available_models[0][0]
+
+            # Mark as busy and increment usage
+            MODEL_USAGE_STATS["fast_model_busy_states"][model_index] = True
+            MODEL_USAGE_STATS["fast_model_usage_count"][model_index] += 1
+
+            logger.debug("🎯 Selected fast model %d (usage: %d, available: %d/%d)",
+                         model_index + 1,
+                         MODEL_USAGE_STATS["fast_model_usage_count"][model_index],
+                         len(available_models) - 1,
+                         MODEL_FAST_POOL_SIZE)
+
+            return MODEL_FAST_POOL[model_index], MODEL_USAGE_STATS["fast_model_locks"][model_index], model_index
+
+    # All models busy, return first model (will wait for lock)
+    logger.debug("⚠️ All fast models busy, waiting for model 1...")
+    return MODEL_FAST_POOL[0], MODEL_USAGE_STATS["fast_model_locks"][0], 0
+
+
+def _release_fast_model(model_index):
+    """Release a fast model back to the available pool"""
+    with MODEL_USAGE_STATS["stats_lock"]:
+        if 0 <= model_index < len(MODEL_USAGE_STATS["fast_model_busy_states"]):
+            MODEL_USAGE_STATS["fast_model_busy_states"][model_index] = False
+            logger.debug("✅ Released fast model %d back to pool",
+                         model_index + 1)
+
+
+def _count_available_fast_models():
+    """Count how many fast models are currently available"""
+    with MODEL_USAGE_STATS["stats_lock"]:
+        return sum(1 for busy in MODEL_USAGE_STATS["fast_model_busy_states"] if not busy)
 
 
 def _get_audio_duration_from_file(audio_file_path):
@@ -100,44 +173,55 @@ def _should_use_fast_model(audio_file_path, current_queue_size=0, concurrent_req
     # Check if accurate model is currently busy
     accurate_busy = MODEL_USAGE_STATS["accurate_model_busy"]
 
-    # DEBUG: Add detailed logging with both counters
-    logger.debug("🔍 Routing decision: duration=%.1fs, accurate_busy=%s, concurrent=%d, active=%d, queue=%d",
-                 duration, accurate_busy, concurrent_requests, active_transcriptions, current_queue_size)
+    # Check how many fast models are available
+    available_fast_models = _count_available_fast_models()
 
-    # AGGRESSIVE ROUTING: If accurate model is busy, route short audio to fast model
-    if accurate_busy and duration < 3.0:  # Increased threshold to 3 seconds
-        logger.info(
-            "🚀 Routing audio (%.1fs) to FAST model (accurate model busy)", duration)
+    # DEBUG: Add detailed logging with pool information
+    logger.debug("🔍 Routing decision: duration=%.1fs, accurate_busy=%s, concurrent=%d, active=%d, queue=%d, fast_available=%d/%d",
+                 duration, accurate_busy, concurrent_requests, active_transcriptions, current_queue_size,
+                 available_fast_models, MODEL_FAST_POOL_SIZE)
+
+    # AGGRESSIVE ROUTING: If accurate model is busy, route to fast models
+    if accurate_busy and duration < 3.0 and available_fast_models > 0:
+        logger.info("🚀 Routing audio (%.1fs) to FAST model pool (accurate model busy, %d models available)",
+                    duration, available_fast_models)
         MODEL_USAGE_STATS["fast_uses"] += 1
         return True
 
-    # CONCURRENT PROCESSING: If we have multiple ACTIVE transcriptions, use fast model for shorter clips
-    if active_transcriptions >= 1 and duration < 2.0:  # Use active transcriptions instead
-        logger.info("⚡ Concurrent processing (%d active transcriptions), routing short audio (%.1fs) to FAST model",
-                    active_transcriptions, duration)
+    # CONCURRENT PROCESSING: If we have multiple ACTIVE transcriptions and fast models available
+    if active_transcriptions >= 1 and duration < 2.0 and available_fast_models > 0:
+        logger.info("⚡ Concurrent processing (%d active transcriptions), routing short audio (%.1fs) to FAST model pool (%d available)",
+                    active_transcriptions, duration, available_fast_models)
         MODEL_USAGE_STATS["fast_uses"] += 1
         return True
 
-    # QUEUE-BASED ROUTING: High queue load - use fast model more aggressively
-    if current_queue_size > 2 and duration < 2.5:
-        logger.info("🔥 Queue load (%d), routing audio (%.1fs) to FAST model",
-                    current_queue_size, duration)
+    # QUEUE-BASED ROUTING: High queue load - use fast models more aggressively
+    if current_queue_size > 2 and duration < 2.5 and available_fast_models > 0:
+        logger.info("🔥 Queue load (%d), routing audio (%.1fs) to FAST model pool (%d available)",
+                    current_queue_size, duration, available_fast_models)
         MODEL_USAGE_STATS["fast_uses"] += 1
         MODEL_USAGE_STATS["queue_overflows"] += 1
+        return True
+
+    # LOAD BALANCING: If we have multiple fast models available, use them more often
+    if available_fast_models >= 2 and duration < 3.0:
+        logger.info("⚖️ Load balancing: routing audio (%.1fs) to FAST model pool (%d models available)",
+                    duration, available_fast_models)
+        MODEL_USAGE_STATS["fast_uses"] += 1
         return True
 
     # EVERY 3rd SHORT CLIP: Route every 3rd short audio to fast model for load balancing
     total_uses = MODEL_USAGE_STATS["accurate_uses"] + \
         MODEL_USAGE_STATS["fast_uses"]
-    if duration < 1.5 and total_uses > 0 and total_uses % 3 == 0:
+    if duration < 1.5 and total_uses > 0 and total_uses % 3 == 0 and available_fast_models > 0:
         logger.info(
-            "⚖️ Load balancing: routing short audio (%.1fs) to FAST model (every 3rd)", duration)
+            "⚖️ Periodic load balancing: routing short audio (%.1fs) to FAST model pool (every 3rd)", duration)
         MODEL_USAGE_STATS["fast_uses"] += 1
         return True
 
     # Default: Use accurate model for best quality
-    logger.info("🎯 Routing audio (%.1fs) to ACCURATE model (concurrent: %d, active: %d, queue: %d)",
-                duration, concurrent_requests, active_transcriptions, current_queue_size)
+    logger.info("🎯 Routing audio (%.1fs) to ACCURATE model (concurrent: %d, active: %d, queue: %d, fast_available: %d)",
+                duration, concurrent_requests, active_transcriptions, current_queue_size, available_fast_models)
     MODEL_USAGE_STATS["accurate_uses"] += 1
     return False
 
@@ -185,7 +269,7 @@ def _reset_model_state(model):
         return False
 
 
-async def transcribe_with_model(audio_file_path, model, model_name):
+async def transcribe_with_model(audio_file_path, model, model_name, model_index=None):
     """Transcribe using a specific model with consistent parameters - TRUE ASYNC VERSION"""
 
     # Generate unique ID for this transcription request
@@ -193,7 +277,12 @@ async def transcribe_with_model(audio_file_path, model, model_name):
     transcription_id = str(uuid.uuid4())[:8]
 
     # Get the appropriate model lock
-    model_lock = MODEL_USAGE_STATS["accurate_model_lock"] if model_name == "accurate" else MODEL_USAGE_STATS["fast_model_lock"]
+    if model_name == "accurate":
+        model_lock = MODEL_USAGE_STATS["accurate_model_lock"]
+        model_display_name = "ACCURATE"
+    else:
+        model_lock = MODEL_USAGE_STATS["fast_model_locks"][model_index]
+        model_display_name = f"FAST-{model_index + 1}"
 
     # Thread-safe tracking of active transcriptions
     with MODEL_USAGE_STATS["stats_lock"]:
@@ -203,12 +292,11 @@ async def transcribe_with_model(audio_file_path, model, model_name):
         # Mark model as busy
         if model_name == "accurate":
             MODEL_USAGE_STATS["accurate_model_busy"] = True
-        else:
-            MODEL_USAGE_STATS["fast_model_busy"] = True
+        # Fast model busy state is handled in _get_available_fast_model
 
     try:
         logger.debug("🔄 [%s] Processing with %s model... (active: %d)",
-                     transcription_id, model_name.upper(), active_count)
+                     transcription_id, model_display_name, active_count)
 
         # CRITICAL: Use model lock to prevent concurrent access to the same model
         def safe_transcribe():
@@ -233,7 +321,7 @@ async def transcribe_with_model(audio_file_path, model, model_name):
                         # Second attempt: without VAD
                         elif retry_count == 1:
                             logger.warning(
-                                "Retrying %s model without VAD", model_name)
+                                "Retrying %s model without VAD", model_display_name)
                             return model.transcribe(
                                 audio_file_path,
                                 vad=False,  # Disable VAD
@@ -246,7 +334,7 @@ async def transcribe_with_model(audio_file_path, model, model_name):
                         # Third attempt: minimal settings
                         else:
                             logger.warning(
-                                "Final retry for %s model with minimal settings", model_name)
+                                "Final retry for %s model with minimal settings", model_display_name)
                             return model.transcribe(
                                 audio_file_path,
                                 vad=False,
@@ -263,7 +351,7 @@ async def transcribe_with_model(audio_file_path, model, model_name):
                         if _is_recoverable_error(error_str):
                             logger.warning(
                                 "PyTorch/FFmpeg/VAD error in %s model (attempt %d/%d): %s",
-                                model_name, retry_count, max_retries + 1, error_str)
+                                model_display_name, retry_count, max_retries + 1, error_str)
 
                             # Reset model state before retry
                             _reset_model_state(model)
@@ -274,7 +362,7 @@ async def transcribe_with_model(audio_file_path, model, model_name):
 
                             if retry_count > max_retries:
                                 logger.error(
-                                    "Max retries exceeded for %s model, skipping audio", model_name)
+                                    "Max retries exceeded for %s model, skipping audio", model_display_name)
                                 return None  # Return None to indicate failure
                             continue
                         else:
@@ -290,19 +378,25 @@ async def transcribe_with_model(audio_file_path, model, model_name):
         # Handle failure case
         if result is None:
             logger.warning(
-                "Transcription failed for %s model after all retries", model_name)
+                "Transcription failed for %s model after all retries", model_display_name)
             return "", "en", None
 
         # Extract text and detected language
         transcribed_text = result.text if result.text else ""
         detected_language = result.language if result.language else "en"
 
-        logger.debug("✅ [%s] %s model completed transcription",
-                     transcription_id, model_name.upper())
+        # CRITICAL DEBUG: Add detailed logging of transcription results
+        logger.debug("✅ [%s] %s model completed transcription: text='%s' (length: %d), language='%s'",
+                     transcription_id, model_display_name,
+                     transcribed_text[:100] if transcribed_text else "EMPTY",
+                     len(transcribed_text) if transcribed_text else 0,
+                     detected_language)
+
         return transcribed_text, detected_language, result
 
     except Exception as e:
-        logger.error("Unexpected error in %s model: %s", model_name, str(e))
+        logger.error("Unexpected error in %s model: %s",
+                     model_display_name, str(e))
         # Reset model state on any unexpected error
         _reset_model_state(model)
         # Return empty result instead of crashing
@@ -313,11 +407,13 @@ async def transcribe_with_model(audio_file_path, model, model_name):
             MODEL_USAGE_STATS["active_transcriptions"].discard(
                 transcription_id)
 
-            # Mark model as not busy only if no other requests using this model
+            # Mark model as not busy
             if model_name == "accurate":
                 MODEL_USAGE_STATS["accurate_model_busy"] = False
             else:
-                MODEL_USAGE_STATS["fast_model_busy"] = False
+                # Release fast model back to pool
+                if model_index is not None:
+                    _release_fast_model(model_index)
 
 
 async def transcribe(audio_file_path, current_queue_size=0):
@@ -342,17 +438,18 @@ async def transcribe(audio_file_path, current_queue_size=0):
         active_transcriptions = len(MODEL_USAGE_STATS["active_transcriptions"])
 
     try:
-        # Load both models if needed
-        model_accurate, model_fast = _load_models_if_needed()
+        # Load accurate model and fast model pool if needed
+        model_accurate, model_fast_pool = _load_models_if_needed()
 
         # Determine which model to use (now with proper concurrent tracking)
         use_fast = _should_use_fast_model(audio_file_path, current_queue_size,
                                           current_concurrent, active_transcriptions)
 
         if use_fast:
-            # Use fast model for quick processing
+            # Use fast model pool for quick processing
+            model_fast, model_lock, model_index = _get_available_fast_model()
             transcribed_text, detected_language, result = await transcribe_with_model(
-                audio_file_path, model_fast, "fast"
+                audio_file_path, model_fast, "fast", model_index
             )
         else:
             # Use accurate model for best quality
@@ -432,9 +529,8 @@ async def transcribe(audio_file_path, current_queue_size=0):
                 avg_log_prob = sum(confidences) / len(confidences)
                 confidence_threshold = -1.5
                 if avg_log_prob < confidence_threshold:
-                    logger.info(
-                        "Low confidence transcription rejected (%s): '%s'",
-                        f"{avg_log_prob:.2f}", transcribed_text)
+                    logger.info("Low confidence transcription rejected (%s): '%s'",
+                                f"{avg_log_prob:.2f}", transcribed_text)
                     return "", detected_language
 
                 # Special case for common hallucinations
@@ -450,20 +546,30 @@ async def transcribe(audio_file_path, current_queue_size=0):
                             "Short statement '%s' rejected with confidence %.2f", text, avg_log_prob)
                         return "", detected_language
 
-                logger.info(
-                    "Transcription confidence: %.2f, Language: %s", avg_log_prob, detected_language)
+                logger.info("Transcription confidence: %.2f, Language: %s",
+                            avg_log_prob, detected_language)
 
-        # Log model usage stats periodically
+        # Log model usage stats periodically with pool information
         total_uses = MODEL_USAGE_STATS["accurate_uses"] + \
             MODEL_USAGE_STATS["fast_uses"]
         if total_uses % 10 == 0 and total_uses > 0:
             accuracy_rate = (
                 MODEL_USAGE_STATS["accurate_uses"] / total_uses) * 100
             fast_rate = (MODEL_USAGE_STATS["fast_uses"] / total_uses) * 100
-            logger.info("📊 Model usage: Accurate: %d (%.1f%%), Fast: %d (%.1f%%), Queue overflows: %d",
-                        MODEL_USAGE_STATS["accurate_uses"], accuracy_rate,
-                        MODEL_USAGE_STATS["fast_uses"], fast_rate,
-                        MODEL_USAGE_STATS["queue_overflows"])
+
+            # Add pool usage statistics
+            if MODEL_USAGE_STATS["fast_model_usage_count"]:
+                pool_usage = ", ".join(
+                    [f"M{i+1}:{count}" for i, count in enumerate(MODEL_USAGE_STATS["fast_model_usage_count"])])
+                logger.info("📊 Model usage: Accurate: %d (%.1f%%), Fast: %d (%.1f%%), Pool: [%s], Queue overflows: %d",
+                            MODEL_USAGE_STATS["accurate_uses"], accuracy_rate,
+                            MODEL_USAGE_STATS["fast_uses"], fast_rate,
+                            pool_usage, MODEL_USAGE_STATS["queue_overflows"])
+            else:
+                logger.info("📊 Model usage: Accurate: %d (%.1f%%), Fast: %d (%.1f%%), Queue overflows: %d",
+                            MODEL_USAGE_STATS["accurate_uses"], accuracy_rate,
+                            MODEL_USAGE_STATS["fast_uses"], fast_rate,
+                            MODEL_USAGE_STATS["queue_overflows"])
 
         return transcribed_text, detected_language
 
@@ -541,18 +647,33 @@ def create_dummy_audio_file(filename="warmup_audio.wav"):
     Returns:
         str: Path to the created audio file
     """
-    # Create a 1-second file of silence (with a tiny bit of noise)
-    # using the format Whisper expects (16kHz, 16-bit, mono)
-    sample_rate = 16000
-    duration = 1  # 1 second
+    # Create a 2-second file with actual speech-like noise for better warmup
+    # using the format Discord expects (48kHz, 16-bit, stereo)
+    sample_rate = 48000  # Changed to match Discord format
+    duration = 2  # Increased to 2 seconds
+    channels = 2  # Stereo for Discord compatibility
 
-    # Create an array of small random values (quiet noise)
-    audio_data = np.random.normal(
-        0, 0.01, sample_rate * duration).astype(np.int16)
+    # Create an array with speech-like noise patterns instead of pure random
+    num_samples = sample_rate * duration
+
+    # Generate a simple sine wave with noise to simulate speech
+    t = np.linspace(0, duration, num_samples, False)
+    # Mix of frequencies that resemble human speech
+    signal = (np.sin(2 * np.pi * 440 * t) * 0.3 +  # A4 note
+              np.sin(2 * np.pi * 880 * t) * 0.2 +  # A5 note
+              np.random.normal(0, 0.1, num_samples))  # Background noise
+
+    # Normalize and convert to 16-bit
+    signal = np.clip(signal, -1, 1)
+    audio_data = (signal * 32767).astype(np.int16)
+
+    # Convert mono to stereo by duplicating the channel
+    if channels == 2:
+        audio_data = np.column_stack((audio_data, audio_data))
 
     # Write to WAV file
     with wave.Wave_write(filename) as wf:
-        wf.setnchannels(1)  # Mono
+        wf.setnchannels(channels)
         wf.setsampwidth(2)  # 16-bit
         wf.setframerate(sample_rate)
         wf.writeframes(audio_data.tobytes())
@@ -560,33 +681,158 @@ def create_dummy_audio_file(filename="warmup_audio.wav"):
     return filename
 
 
+async def safe_warmup_transcribe(audio_file, model, model_name, model_index=None):
+    """Safe transcription for warmup with timeout and error handling."""
+    try:
+        # For warmup, we bypass the normal model selection and busy state tracking
+        # and directly call the model with a simplified approach
+        if model_name == "fast":
+            # Direct warmup without using the pool selection mechanism
+            model_display_name = f"FAST-{model_index + 1}"
+
+            # Generate unique ID for this warmup transcription
+            import uuid
+            transcription_id = str(uuid.uuid4())[:8]
+
+            # Get the specific model lock for this fast model
+            model_lock = MODEL_USAGE_STATS["fast_model_locks"][model_index]
+
+            def warmup_transcribe():
+                with model_lock:  # Use the specific model lock
+                    try:
+                        # Simple transcription without VAD for warmup
+                        return model.transcribe(
+                            audio_file,
+                            vad=False,  # Disable VAD for warmup
+                            no_speech_threshold=0.8,
+                            word_timestamps=False
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "Warmup transcription error for %s: %s", model_display_name, str(e))
+                        return None
+
+            # CRITICAL FIX: Run in thread pool with proper awaiting
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, warmup_transcribe)
+
+            logger.debug(
+                "Warmup transcription completed for %s model", model_display_name)
+            return result is not None
+
+        else:
+            # Accurate model warmup - use normal transcribe_with_model
+            transcribed_text, detected_language, result = await transcribe_with_model(
+                audio_file, model, model_name, model_index
+            )
+
+            logger.debug(
+                "Warmup transcription completed for %s model", model_name.upper())
+            return result is not None
+
+    except asyncio.TimeoutError:
+        logger.warning("Warmup transcription timed out for %s model - continuing anyway",
+                       model_name.upper() + (f"-{model_index + 1}" if model_index is not None else ""))
+        return False
+    except Exception as e:
+        logger.warning("Warmup transcription failed for %s model: %s - continuing anyway",
+                       model_name.upper() + (f"-{model_index + 1}" if model_index is not None else ""), str(e))
+        return False
+
+
 async def warm_up_pipeline():
     """Warm up both transcription models for optimal performance."""
-    logger.info("Warming up DUAL MODEL transcription pipeline...")
+    logger.info(
+        "Warming up DUAL MODEL transcription pipeline with fast model pool...")
+    dummy_files = []  # Track all dummy files for cleanup
+
     try:
-        # Create a dummy audio file
-        dummy_file = create_dummy_audio_file()
+        # Load accurate model and fast model pool explicitly
+        logger.info("Loading accurate model and fast model pool for warm-up...")
+        model_accurate, model_fast_pool = _load_models_if_needed()
 
-        # Load both models explicitly
-        logger.info("Loading both models for warm-up...")
-        model_accurate, model_fast = _load_models_if_needed()
+        # Create a dummy audio file for the accurate model
+        accurate_dummy_file = create_dummy_audio_file("warmup_accurate.wav")
+        dummy_files.append(accurate_dummy_file)
+        logger.debug(
+            "Created warmup audio file for accurate model: %s", accurate_dummy_file)
 
-        # Warm up accurate model
+        # Warm up accurate model with timeout protection
         logger.info("Warming up accurate model...")
-        await transcribe_with_model(dummy_file, model_accurate, "accurate")
+        accurate_success = await safe_warmup_transcribe(accurate_dummy_file, model_accurate, "accurate")
 
-        # Warm up fast model
-        logger.info("Warming up fast model...")
-        await transcribe_with_model(dummy_file, model_fast, "fast")
+        if accurate_success:
+            logger.info("✅ Accurate model warmed up successfully")
+        else:
+            logger.warning(
+                "⚠️ Accurate model warmup had issues but continuing")
 
-        # Clean up
-        if os.path.exists(dummy_file):
-            os.remove(dummy_file)
+        # Warm up all fast models in the pool with timeout protection
+        logger.info("Warming up fast model pool...")
+        fast_successes = 0
+
+        # CRITICAL FIX: Use asyncio.gather to run all fast model warmups concurrently
+        # but ensure each has its own unique file
+        warmup_tasks = []
+        for i, model_fast in enumerate(model_fast_pool):
+            logger.info("Warming up fast model %d/%d...",
+                        i+1, len(model_fast_pool))
+
+            # Create a unique dummy audio file for each fast model
+            fast_dummy_file = create_dummy_audio_file(f"warmup_fast_{i+1}.wav")
+            dummy_files.append(fast_dummy_file)
+            logger.debug(
+                "Created warmup audio file for fast model %d: %s", i+1, fast_dummy_file)
+
+            # Create a warmup task for this model
+            warmup_task = safe_warmup_transcribe(
+                fast_dummy_file, model_fast, "fast", i)
+            warmup_tasks.append((warmup_task, i+1))
+
+        # Wait for all fast model warmups to complete
+        for warmup_task, model_num in warmup_tasks:
+            try:
+                fast_success = await asyncio.wait_for(warmup_task, timeout=30.0)
+                if fast_success:
+                    fast_successes += 1
+                    logger.info("✅ Fast model %d/%d warmed up successfully",
+                                model_num, len(model_fast_pool))
+                else:
+                    logger.warning(
+                        "⚠️ Fast model %d/%d warmup had issues but continuing", model_num, len(model_fast_pool))
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "⚠️ Fast model %d/%d warmup timed out but continuing", model_num, len(model_fast_pool))
+            except Exception as e:
+                logger.warning(
+                    "⚠️ Fast model %d/%d warmup failed: %s but continuing", model_num, len(model_fast_pool), str(e))
+
+        # Report results
+        if fast_successes == len(model_fast_pool):
+            logger.info("✅ All fast models warmed up successfully")
+        else:
+            logger.warning("⚠️ %d/%d fast models warmed up successfully",
+                           fast_successes, len(model_fast_pool))
 
         logger.info(
-            "🎯 Dual model pipeline warm-up complete! Ready for smart routing.")
-        logger.info("📈 Accurate model: %s, Fast model: %s",
-                    MODEL_ACCURATE_NAME, MODEL_FAST_NAME)
+            "🎯 Enhanced dual model pipeline warm-up complete! Ready for smart routing.")
+        logger.info("📈 Accurate model: %s, Fast model pool: %d x %s",
+                    MODEL_ACCURATE_NAME, MODEL_FAST_POOL_SIZE, MODEL_FAST_NAME)
+        logger.info(
+            "🚀 Total VRAM models loaded: %d models ready for parallel processing", 1 + MODEL_FAST_POOL_SIZE)
 
-    except (IOError, FileNotFoundError, PermissionError, RuntimeError) as e:
-        logger.error("Warm-up error (non-critical): %s", str(e))
+    except Exception as e:
+        logger.error("Warmup error: %s", str(e))
+        logger.info(
+            "🔄 Models loaded but warmup incomplete - system will work normally")
+    finally:
+        # Clean up all dummy files
+        for dummy_file in dummy_files:
+            if dummy_file and os.path.exists(dummy_file):
+                try:
+                    os.remove(dummy_file)
+                    logger.debug(
+                        "Cleaned up warmup audio file: %s", dummy_file)
+                except OSError as e:
+                    logger.warning(
+                        "Could not clean up warmup file %s: %s", dummy_file, str(e))

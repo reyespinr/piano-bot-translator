@@ -97,7 +97,8 @@ class WorkerManager:
     def __post_init__(self):
         """Initialize mutable default values."""
         if self.queue is None:
-            self.queue = queue.Queue(maxsize=10)
+            # CRITICAL FIX: Increase queue size significantly to handle busy conversations
+            self.queue = queue.Queue(maxsize=50)  # Increased from 10 to 50
         if self.workers is None:
             self.workers = []
 
@@ -429,27 +430,54 @@ class RealTimeWaveSink(WaveSink):
 
         while self.workers.running:
             try:
-                # Get item from queue with timeout (no debug message for waiting)
+                # Get item from queue with timeout
                 audio_file, user = self.workers.queue.get(timeout=1)
-                logger.debug("Processing audio for user %s", user)
+                logger.info("%s processing audio for user %s: %s",
+                            thread_name, user, audio_file)
 
-                # Process the transcription
-                asyncio.run_coroutine_threadsafe(
-                    self.transcribe_audio(audio_file, user),
-                    self.workers.event_loop
-                )
+                # CRITICAL FIX: Use asyncio.run for clean event loop management
+                try:
+                    # Use asyncio.run which properly creates and cleans up the event loop
+                    result = asyncio.run(
+                        self.transcribe_audio(audio_file, user))
+                    logger.debug(
+                        "%s completed transcription for user %s", thread_name, user)
+                except Exception as transcription_error:
+                    logger.error("%s transcription failed for user %s: %s",
+                                 thread_name, user, str(transcription_error))
+                    import traceback
+                    logger.debug("Transcription error traceback: %s",
+                                 traceback.format_exc())
 
-                # Wait a little before processing next item
-                time.sleep(0.2)
+                    # Clean up the file since transcription failed
+                    if os.path.exists(audio_file):
+                        try:
+                            os.remove(audio_file)
+                            logger.debug(
+                                "Cleaned up failed audio file: %s", audio_file)
+                        except OSError as e:
+                            logger.warning(
+                                "Failed to clean up failed file %s: %s", audio_file, e)
+
+                # CRITICAL: Always mark task as done
                 self.workers.queue.task_done()
+
+                # Brief pause between processing
+                time.sleep(0.1)
+
             except queue.Empty:
-                # No debug message for empty queue
-                pass
-            except (OSError, IOError, ValueError, TypeError, AttributeError, RuntimeError) as e:
-                logger.error("Error in transcription worker: %s", e)
-            # If you truly want to catch all, uncomment below:
-            # except Exception as e:  # pylint: disable=broad-except
-            #     logger.error("Unexpected error in transcription worker: %s", e)
+                # No items in queue, continue waiting
+                continue
+            except Exception as e:
+                logger.error("%s unexpected error: %s", thread_name, str(e))
+                import traceback
+                logger.error("Worker error traceback: %s",
+                             traceback.format_exc())
+                # Try to mark task as done if we got something from queue
+                try:
+                    self.workers.queue.task_done()
+                except ValueError:
+                    pass  # task_done called too many times, ignore
 
         logger.info("%s stopped", thread_name)
 
@@ -580,16 +608,32 @@ class RealTimeWaveSink(WaveSink):
             logger.info("Processing speech for user %s, audio file size: %d bytes",
                         user, os.path.getsize(temp_audio_file))
 
-            # Add to transcription queue
-            if not self.workers.queue.full():
+            # CRITICAL FIX: Check queue space and add more details about queue state
+            current_queue_size = self.workers.queue.qsize()
+            max_queue_size = self.workers.queue.maxsize
+
+            logger.debug("Queue status: %d/%d items",
+                         current_queue_size, max_queue_size)
+
+            # Add to transcription queue with non-blocking put
+            try:
                 self.workers.queue.put((temp_audio_file, user), block=False)
                 logger.debug(
-                    "Added transcription task to queue for user %s", user)
+                    "✅ Added transcription task to queue for user %s (queue: %d/%d)",
+                    user, current_queue_size + 1, max_queue_size)
                 user_state.last_processed_time = current_time
-            else:
+            except queue.Full:
                 logger.warning(
-                    "Transcription queue full, skipping audio for user %s", user)
-                os.remove(temp_audio_file)  # Clean up
+                    "❌ Transcription queue full (%d/%d), skipping audio for user %s",
+                    current_queue_size, max_queue_size, user)
+                # Clean up the file since we can't process it
+                try:
+                    os.remove(temp_audio_file)
+                    logger.debug(
+                        "Cleaned up skipped audio file: %s", temp_audio_file)
+                except OSError as e:
+                    logger.warning(
+                        "Failed to clean up skipped file: %s", str(e))
 
         except (IOError, OSError, wave.Error) as e:
             logger.error("Error creating WAV file for user %s: %s", user, e)
@@ -671,6 +715,9 @@ class RealTimeWaveSink(WaveSink):
 
     async def transcribe_audio(self, audio_file, user):
         """Transcribe the audio file with smart model routing and update the GUI with results."""
+        logger.debug(
+            "Starting transcription for user %s, file: %s", user, audio_file)
+
         try:
             # Skip if file doesn't exist
             if not os.path.exists(audio_file):
@@ -682,6 +729,9 @@ class RealTimeWaveSink(WaveSink):
             detected_language = None
 
             try:
+                logger.debug(
+                    "Calling utils.transcribe for file: %s", audio_file)
+
                 # Get current queue size for smart routing
                 current_queue_size = self.workers.queue.qsize()
 
@@ -690,56 +740,116 @@ class RealTimeWaveSink(WaveSink):
                     audio_file, current_queue_size=current_queue_size
                 )
 
+                logger.debug("Transcription result for user %s: text='%s', language=%s",
+                             user, transcribed_text[:50] if transcribed_text else "None", detected_language)
+
                 # Skip processing if transcription was empty (failed confidence check)
                 if not transcribed_text:
                     logger.debug(
                         "Empty transcription for user %s, skipping processing.", user)
                     return  # Will be cleaned up in finally block
 
-            except (OSError, IOError, ValueError, TypeError, AttributeError, RuntimeError) as e:
-                logger.error("Error during transcription: %s", e)
+                logger.info("✅ Transcription for user %s: %s",
+                            user, transcribed_text)
+
+            except Exception as e:
+                logger.error(
+                    "Error during transcription for user %s: %s", user, str(e))
+                import traceback
+                logger.debug("Transcription error traceback: %s",
+                             traceback.format_exc())
                 return  # Will be cleaned up in finally block
 
+            # CRITICAL FIX: Process the transcription and translation synchronously in this async context
             try:
                 # Determine if translation is needed
                 needs_translation = await utils.should_translate(transcribed_text, detected_language)
+                logger.debug("Translation needed for user %s: %s",
+                             user, needs_translation)
 
                 if needs_translation:
-                    translated_text = await utils.translate(transcribed_text)
-                    logger.info("Translated from %s to English",
-                                detected_language)
+                    try:
+                        translated_text = await utils.translate(transcribed_text)
+                        logger.info("✅ Translated from %s to English for user %s: %s",
+                                    detected_language, user, translated_text)
+                    except Exception as e:
+                        logger.error(
+                            "Translation failed for user %s: %s", user, str(e))
+                        translated_text = transcribed_text  # Fallback to original text
                 else:
                     # Skip translation for English or empty text
                     translated_text = transcribed_text
-                    logger.info("Processing speech in %s", detected_language)
+                    logger.debug(
+                        "No translation needed for user %s (language: %s)", user, detected_language)
 
-                # Clean log output
-                logger.info("Transcription: %s", transcribed_text)
-                if needs_translation:
-                    logger.info("Translation: %s", translated_text)
+                # CRITICAL FIX: Always try to send the callback regardless of GUI updates
+                if self.translation_callback is not None:
+                    logger.debug(
+                        "🔄 Calling translation callback for user %s", user)
 
-                # Try updating GUI if available
-                try:
-                    await self._update_gui(user, transcribed_text, translated_text)
-                except (OSError, IOError, ValueError, TypeError, AttributeError, RuntimeError) as e:
-                    logger.error("GUI update failed: %s", e)
-                    # Even if GUI update fails, try the translation callback directly
-                    if self.translation_callback is not None:
+                    try:
+                        # Send transcription first
                         await self.translation_callback(user, transcribed_text, message_type="transcription")
-                    if (needs_translation and translated_text != transcribed_text and self.translation_callback is not None):
-                        await self.translation_callback(user, translated_text, message_type="translation")
+                        logger.info(
+                            "📤 Sent transcription callback for user %s: %s", user, transcribed_text)
 
-            except (OSError, IOError, ValueError, TypeError, AttributeError, RuntimeError) as e:
-                logger.error("Error during translation processing: %s", e)
+                        # Then send translation
+                        await self.translation_callback(user, translated_text, message_type="translation")
+                        logger.info(
+                            "📤 Sent translation callback for user %s: %s", user, translated_text)
+
+                    except TypeError as e:
+                        # Try without message_type parameter as a fallback
+                        logger.warning(
+                            "Callback TypeError for user %s: %s, trying fallback", user, str(e))
+                        try:
+                            await self.translation_callback(user, transcribed_text)
+                            logger.info(
+                                "📤 Sent fallback transcription callback for user %s", user)
+
+                            if transcribed_text != translated_text:
+                                await self.translation_callback(user, translated_text)
+                                logger.info(
+                                    "📤 Sent fallback translation callback for user %s", user)
+                        except Exception as fallback_error:
+                            logger.error(
+                                "❌ Fallback callback also failed for user %s: %s", user, str(fallback_error))
+
+                    except Exception as callback_error:
+                        logger.error(
+                            "❌ Translation callback failed for user %s: %s", user, str(callback_error))
+                        import traceback
+                        logger.debug("Callback error traceback: %s",
+                                     traceback.format_exc())
+                else:
+                    logger.error(
+                        "❌ No translation_callback available for user %s", user)
+
+            except Exception as e:
+                logger.error(
+                    "Error during translation processing for user %s: %s", user, str(e))
+                import traceback
+                logger.debug(
+                    "Translation processing error traceback: %s", traceback.format_exc())
 
         except Exception as e:
             logger.error(
-                "Unexpected error during transcription/translation for user %s: %s", user, e)
+                "Unexpected error during transcription/translation for user %s: %s", user, str(e))
+            import traceback
+            logger.error("Full traceback: %s", traceback.format_exc())
         finally:
             # CRITICAL: Always delete the file - moved to finally to ensure it always runs
-            success = await self._force_delete_file(audio_file)
-            if not success:
-                logger.warning("Failed to delete audio file: %s", audio_file)
+            try:
+                success = await self._force_delete_file(audio_file)
+                if success:
+                    logger.debug(
+                        "🗑️ Successfully deleted audio file: %s", audio_file)
+                else:
+                    logger.warning(
+                        "⚠️ Failed to delete audio file: %s", audio_file)
+            except Exception as cleanup_error:
+                logger.error("Error during file cleanup for %s: %s",
+                             audio_file, str(cleanup_error))
 
     async def _force_delete_file(self, file_path):
         """Forcefully delete a file with multiple retries and GC."""
@@ -820,11 +930,15 @@ class RealTimeWaveSink(WaveSink):
 
     async def _update_gui(self, user, transcribed_text, translated_text):
         """Update the GUI with transcription and translation results."""
+        logger.debug("_update_gui called for user %s", user)
+
         try:
             # Try to update the GUI through parent object
             if hasattr(self, 'parent') and self.parent:
                 # Check if the parent has a update_text_display method
                 if hasattr(self.parent, 'update_text_display'):
+                    logger.debug(
+                        "Calling parent.update_text_display for user %s", user)
                     self.parent.update_text_display(
                         transcribed_text, translated_text)
                     return
@@ -832,41 +946,61 @@ class RealTimeWaveSink(WaveSink):
             # If we get here, try the translation callback
             if self.translation_callback is not None:
                 try:
+                    logger.debug(
+                        "Calling translation_callback for user %s", user)
                     # Send transcription first
-                    await self.translation_callback(user,
-                                                    transcribed_text,
-                                                    message_type="transcription")
+                    await self.translation_callback(user, transcribed_text, message_type="transcription")
+                    logger.debug(
+                        "Transcription callback completed for user %s", user)
 
                     # Then send translation if different
                     if transcribed_text != translated_text:
-                        await self.translation_callback(user,
-                                                        translated_text,
-                                                        message_type="translation")
+                        await self.translation_callback(user, translated_text, message_type="translation")
+                        logger.debug(
+                            "Translation callback completed for user %s", user)
                     else:
-                        await self.translation_callback(user,
-                                                        translated_text,
-                                                        message_type="translation")
+                        await self.translation_callback(user, translated_text, message_type="translation")
+                        logger.debug(
+                            "Translation callback completed (same as transcriptions) for user %s", user)
 
                     return
                 except TypeError as e:
                     # Try without message_type parameter as a fallback
                     logger.debug(
-                        "Error with message_type parameter: %s, trying without it", e)
+                        "Error with message_type parameter for user %s: %s, trying without it", user, e)
                     if self.translation_callback is not None:
                         await self.translation_callback(user, transcribed_text)
-                    if (transcribed_text != translated_text
-                            and self.translation_callback is not None):
+                        logger.debug(
+                            "Fallback transcription callback completed for user %s", user)
+                    if (transcribed_text != translated_text and self.translation_callback is not None):
                         await self.translation_callback(user, translated_text)
+                        logger.debug(
+                            "Fallback translation callback completed for user %s", user)
                     return
+            else:
+                logger.warning(
+                    "No translation_callback available for user %s", user)
 
-        except (AttributeError, TypeError, ValueError) as e:
-            logger.error("Error updating display for user %s: %s", user, e)
-            logger.debug("TEXT-FLOW: Traceback: %s", traceback.format_exc())
+        except Exception as e:
+            logger.error(
+                "Error updating display for user %s: %s", user, str(e))
+            import traceback
+            logger.debug("GUI update error traceback: %s",
+                         traceback.format_exc())
 
     def _check_inactive_speakers(self):
         """Periodically check for users who have stopped speaking but haven't been processed."""
         try:
             current_time = time.time()
+
+            # CRITICAL FIX: Add queue monitoring
+            queue_size = self.workers.queue.qsize()
+            if queue_size > 30:  # Warn if queue is getting full
+                logger.warning(
+                    "⚠️ Transcription queue getting full: %d/50 items", queue_size)
+            elif queue_size > 0:
+                logger.debug("📊 Queue status: %d/50 items", queue_size)
+
             # Check each user
             for user, user_state in list(self.users.items()):
                 if (user_state.is_speaking and user_state.speech_detected):
@@ -887,7 +1021,7 @@ class RealTimeWaveSink(WaveSink):
             # Reschedule the timer if still running
             if self.workers.running:
                 self.workers.timer = threading.Timer(
-                    0.5, self._check_inactive_speakers)
+                    1.0, self._check_inactive_speakers)  # Increased from 0.5 to 1.0 to reduce overhead
                 self.workers.timer.daemon = True
                 self.workers.timer.start()
 

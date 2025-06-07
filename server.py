@@ -651,3 +651,52 @@ if __name__ == "__main__":
         logger.info("Could not start server on any of the attempted ports.")
         logger.info(
             "Try running as administrator or check your firewall settings.")
+
+
+async def translation_callback(user_id: str, text: str, message_type: str = None):
+    """Handle transcription/translation results from the audio processor."""
+    try:
+        logger.debug("🔄 translation_callback called: user=%s, type=%s, text='%s'",
+                     user_id, message_type, text[:50] if text else "None")
+
+        # Get user display name
+        user_name = get_user_display_name(user_id)
+
+        # Create message data
+        message_data = {
+            "user_id": user_id,
+            "user": user_name,
+            "text": text
+        }
+
+        # Send appropriate message type
+        if message_type == "transcription":
+            logger.info(
+                "📤 Sending transcription to WebSocket for user %s: %s", user_name, text)
+            await send_to_websocket({
+                "type": "transcription",
+                "data": message_data
+            })
+        elif message_type == "translation":
+            logger.info(
+                "📤 Sending translation to WebSocket for user %s: %s", user_name, text)
+            await send_to_websocket({
+                "type": "translation",
+                "data": message_data
+            })
+        else:
+            # Fallback for backward compatibility
+            logger.info(
+                "📤 Sending fallback message to WebSocket for user %s: %s", user_name, text)
+            await send_to_websocket({
+                "type": "translation",
+                "data": message_data
+            })
+
+        logger.debug("✅ translation_callback completed successfully")
+
+    except Exception as e:
+        logger.error("❌ Error in translation_callback: %s", str(e))
+        import traceback
+        logger.debug("Translation callback error traceback: %s",
+                     traceback.format_exc())

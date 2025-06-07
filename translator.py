@@ -6,15 +6,16 @@ for Discord voice channels. It handles audio processing, language detection,
 transcription, and translation using machine learning models.
 """
 import asyncio
-import os
 import gc
-import sys
-import importlib
+import os
 import subprocess
-import struct  # ADD: Missing import for struct errors
+import sys
+import struct  # CRITICAL FIX: Add missing struct import
+import traceback
 from typing import Callable
-from custom_sink import RealTimeWaveSink
 import utils
+import translation
+from custom_sink import RealTimeWaveSink
 from logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -25,28 +26,293 @@ MAX_DELETE_RETRIES = 3
 
 
 class VoiceTranslator:
-    """
-    Handles real-time voice transcription and translation for Discord.
+    """Voice translation manager for Discord bot."""
 
-    This class manages audio processing, language detection, transcription,
-    and translation for Discord voice channels. It provides methods to start
-    and stop listening, process audio callbacks, and manage voice client
-    connections.
-    """
-
-    def __init__(self, translation_callback: Callable[[str, str], None]):
-        """
-        Initialize the voice translator
-
-        Args:
-            translation_callback: Function to call when a translation is ready.
-                                    Arguments: (user_name, translated_text)
-        """
+    def __init__(self, translation_callback: Callable = None):
         self.translation_callback = translation_callback
-        self.active_voices = {}
+        self.websocket_handler = None
+        self.voice_client = None
         self.sink = None
         self.is_listening = False
-        self.model_loaded = False
+        self.user_processing_enabled = {}  # Track which users have processing enabled
+        self.active_voices = {}  # Track active voice states - FIX: Add missing attribute
+        self.connected_users = {}  # Track connected users
+        logger.info("✅ VoiceTranslator initialized")
+
+    def set_websocket_handler(self, handler):
+        """Set the WebSocket handler for sending user updates."""
+        self.websocket_handler = handler
+
+    async def join_voice_channel(self, channel):
+        """Join a voice channel and set up audio processing."""
+        try:
+            logger.info("Joining voice channel: %s", channel.name)
+
+            # Join the voice channel
+            self.voice_client = await channel.connect()
+            self.current_channel = channel
+
+            # Initialize user processing states for current members
+            self._initialize_user_states()
+
+            # Send user list to WebSocket clients
+            if self.websocket_handler:
+                await self._send_user_updates()
+
+            logger.info(
+                "✅ Successfully joined voice channel: %s", channel.name)
+            return True
+
+        except Exception as e:
+            logger.error("Failed to join voice channel %s: %s",
+                         channel.name, str(e))
+            return False
+
+    def _initialize_user_states(self):
+        """Initialize processing states for users currently in the voice channel."""
+        if not self.current_channel:
+            return
+
+        # Clear existing states
+        self.user_processing_enabled.clear()
+        self.connected_users.clear()
+
+        # Set all current members to enabled by default
+        for member in self.current_channel.members:
+            if not member.bot:  # Exclude bots
+                user_id_str = str(member.id)
+                self.user_processing_enabled[user_id_str] = True
+                self.connected_users[user_id_str] = {
+                    'id': user_id_str,
+                    'name': member.display_name
+                }
+                logger.debug("Initialized user %s (%s) as enabled",
+                             member.display_name, member.id)
+
+    async def _send_user_updates(self):
+        """Send current user list and states to WebSocket clients."""
+        if not self.websocket_handler or not self.current_channel:
+            logger.warning(
+                "No websocket handler or current channel available for user updates")
+            return
+
+        users = []
+        for member in self.current_channel.members:
+            if not member.bot:  # Exclude bots
+                user_id_str = str(member.id)
+                users.append({
+                    'id': user_id_str,
+                    'name': member.display_name
+                })
+                # Ensure user is in processing states
+                if user_id_str not in self.user_processing_enabled:
+                    self.user_processing_enabled[user_id_str] = True
+
+        # Send users update
+        try:
+            await self.websocket_handler.broadcast_message({
+                'type': 'users_update',
+                'users': users,
+                'enabled_states': self.user_processing_enabled.copy()
+            })
+            logger.info(
+                "Sent user updates: %d users with processing states", len(users))
+        except Exception as e:
+            logger.error("Failed to send user updates: %s", str(e))
+
+    async def start_listening(self):
+        """Start listening to voice channel audio with real-time processing."""
+        if not self.voice_client:
+            logger.error("No voice client available")
+            return False
+
+        if self.is_listening:
+            logger.warning("Already listening")
+            return True
+
+        try:
+            logger.info("Creating voice processing sink...")
+
+            # Create the sink with proper callback
+            self.sink = RealTimeWaveSink(
+                pause_threshold=1.0,
+                event_loop=asyncio.get_event_loop(),
+                num_workers=6
+            )
+
+            # Set the parent reference for user toggle access
+            self.sink.parent = self
+
+            # Set the translation callback
+            self.sink.translation_callback = self.process_audio_callback
+
+            # Apply Discord audio corruption protection
+            logger.debug("Applied Discord audio corruption protection")
+
+            # Start recording
+            self.voice_client.start_recording(
+                self.sink,
+                self._handle_audio_finished,
+                *[self.voice_client.guild.get_member(user_id)
+                  for user_id in [m.id for m.id in self.current_channel.members if not m.bot]]
+            )
+
+            logger.debug("Recording started successfully")
+
+            self.is_listening = True
+            logger.debug("Started listening in channel: %s",
+                         self.current_channel.name)
+
+            # CRITICAL FIX: Send user updates after starting to listen
+            await self._send_user_updates()
+
+            return True
+
+        except Exception as e:
+            logger.error("Failed to start listening: %s", str(e))
+            import traceback
+            logger.error("Traceback: %s", traceback.format_exc())
+            return False
+
+    async def process_audio_callback(self, user_id, text, message_type):
+        """Process audio transcription/translation callback."""
+        try:
+            logger.debug(
+                "🔄 process_audio_callback called for user %s with message_type: %s", user_id, message_type)
+
+            if message_type == "transcription":
+                logger.info(
+                    "📝 Received transcription for user %s: %s", user_id, text)
+
+                # Get user info
+                if self.current_channel:
+                    member = self.current_channel.guild.get_member(
+                        int(user_id))
+                    user_name = member.display_name if member else f"User {user_id}"
+                else:
+                    user_name = f"User {user_id}"
+
+                # Send to WebSocket clients
+                if self.websocket_handler:
+                    await self.websocket_handler.broadcast_message({
+                        'type': 'transcription',
+                        'data': {
+                            'user': user_name,
+                            'user_id': str(user_id),
+                            'text': text
+                        }
+                    })
+
+            elif message_type == "translation":
+                logger.info(
+                    "🌍 Received translation for user %s: %s", user_id, text)
+
+                # Get user info
+                if self.current_channel:
+                    member = self.current_channel.guild.get_member(
+                        int(user_id))
+                    user_name = member.display_name if member else f"User {user_id}"
+                else:
+                    user_name = f"User {user_id}"
+
+                # CRITICAL FIX: Send translation to WebSocket clients
+                if self.websocket_handler:
+                    await self.websocket_handler.broadcast_message({
+                        'type': 'translation',
+                        'data': {
+                            'user': user_name,
+                            'user_id': str(user_id),
+                            'text': text
+                        }
+                    })
+                    logger.debug(
+                        "✅ Translation message sent to WebSocket clients")
+                else:
+                    logger.warning(
+                        "❌ No websocket_handler available for translation")
+
+        except Exception as e:
+            logger.error("Error in process_audio_callback: %s", str(e))
+
+    async def toggle_user_processing(self, user_id, enabled):
+        """Toggle processing for a specific user."""
+        try:
+            user_id_str = str(user_id)
+            self.user_processing_enabled[user_id_str] = enabled
+
+            # Get user info for logging
+            if self.current_channel:
+                member = self.current_channel.guild.get_member(int(user_id))
+                user_name = member.display_name if member else f"User {user_id}"
+            else:
+                user_name = f"User {user_id}"
+
+            logger.info("User processing %s for %s (%s)",
+                        "enabled" if enabled else "disabled", user_name, user_id)
+
+            # Send update to WebSocket clients
+            if self.websocket_handler:
+                await self.websocket_handler.broadcast_message({
+                    'type': 'user_toggle',
+                    'user_id': user_id_str,
+                    'enabled': enabled
+                })
+
+            return True
+
+        except Exception as e:
+            logger.error("Error toggling user processing: %s", str(e))
+            return False
+
+    async def handle_voice_state_update(self, member, before, after):
+        """Handle voice state updates (users joining/leaving)."""
+        try:
+            if not self.current_channel:
+                return
+
+            # Check if the update is for our current channel
+            if (before.channel == self.current_channel or
+                    after.channel == self.current_channel):
+
+                if member.bot:  # Ignore bots
+                    return
+
+                user_id_str = str(member.id)
+
+                # User joined our channel
+                if after.channel == self.current_channel and before.channel != self.current_channel:
+                    # Enable processing by default for new users
+                    self.user_processing_enabled[user_id_str] = True
+                    logger.info("User %s joined voice channel",
+                                member.display_name)
+
+                    # Send user joined update
+                    if self.websocket_handler:
+                        await self.websocket_handler.broadcast_message({
+                            'type': 'user_joined',
+                            'user': {
+                                'id': user_id_str,
+                                'name': member.display_name
+                            },
+                            'enabled': True
+                        })
+
+                # User left our channel
+                elif before.channel == self.current_channel and after.channel != self.current_channel:
+                    # Remove from processing states
+                    self.user_processing_enabled.pop(user_id_str, None)
+                    logger.info("User %s left voice channel",
+                                member.display_name)
+
+                    # Send user left update
+                    if self.websocket_handler:
+                        await self.websocket_handler.broadcast_message({
+                            'type': 'user_left',
+                            'user_id': user_id_str
+                        })
+
+        except Exception as e:
+            logger.error("Error handling voice state update: %s", str(e))
 
     async def load_models(self):
         """Verify model loading capabilities and warm up models with timeout protection"""
@@ -54,31 +320,20 @@ class VoiceTranslator:
             logger.info("Loading translation models...")
             # Check if we have the transcribe function available
             if hasattr(utils, "transcribe"):
-                # CRITICAL FIX: Only load models, don't do warmup here
-                # The warmup will be done separately to avoid double warmup
                 try:
                     # Just load the models without warmup first
                     utils._load_models_if_needed()
                     self.model_loaded = True
                     logger.info("✅ Models loaded successfully")
 
-                    # Now do the warmup separately
-                    logger.info("Starting model warmup...")
-                    warmup_task = asyncio.create_task(utils.warm_up_pipeline())
-
-                    try:
-                        # Wait up to 2 minutes for complete warmup
-                        await asyncio.wait_for(warmup_task, timeout=120.0)
-                        logger.info("✅ Model warmup completed successfully")
-                        return True
-                    except asyncio.TimeoutError:
-                        logger.warning(
-                            "⚠️ Model warmup timed out but models are loaded - continuing")
-                        return True
+                    # The server.py handles the warmup, so we don't need to do it here
+                    logger.info(
+                        "✅ Model loading completed (warmup handled by server)")
+                    return True
 
                 except Exception as warmup_error:
                     logger.warning(
-                        "Warmup error but models are loaded: %s", str(warmup_error))
+                        "Model loading error but continuing: %s", str(warmup_error))
                     return True
             else:
                 logger.warning("Model loading mechanism not found")
@@ -91,7 +346,7 @@ class VoiceTranslator:
                     utils._load_models_if_needed()
                     self.model_loaded = True
                     logger.info(
-                        "✅ Models loaded successfully despite warmup error")
+                        "✅ Models loaded successfully despite error")
                     return True
                 except Exception as load_error:
                     logger.error("Failed to load models: %s", str(load_error))
@@ -123,9 +378,7 @@ class VoiceTranslator:
             self.sink.translation_callback = self.process_audio_callback
 
             # Set parent reference to access user_processing_enabled dictionary
-            # Create a simple object to hold the user_processing_enabled dict
             if hasattr(self, 'user_processing_enabled'):
-                # CRITICAL FIX: Create fresh copy to prevent reference issues
                 self.sink.parent = type('obj', (object,), {})
                 processing_settings = {}
                 for k, v in self.user_processing_enabled.items():
@@ -142,62 +395,39 @@ class VoiceTranslator:
                     if 'server' in sys.modules:
                         server_module = sys.modules['server']
                     else:
-                        server_module = importlib.import_module('server')
+                        import server as server_module
 
                     if hasattr(server_module, 'user_processing_enabled'):
-                        # Create a simple object with user_processing_enabled
                         self.sink.parent = type('obj', (object,), {})
-                        self.sink.parent.user_processing_enabled = (
-                            server_module.user_processing_enabled)
-                        logger.debug(
-                            "Set user_processing_enabled from server module "
-                            "with %d entries",
-                            len(server_module.user_processing_enabled))
+                        self.sink.parent.user_processing_enabled = server_module.user_processing_enabled
+                        logger.debug("Using server module user settings")
                 except ImportError:
                     logger.debug("Could not import server module")
 
-            # IMPROVED: Create a robust audio callback that handles Discord.py crashes
+            # Create a robust audio callback that handles Discord.py crashes
             def audio_callback(_sink, *args):
                 async def robust_process():
                     try:
-                        # Only log if we have proper arguments
-                        if len(args) > 0:
-                            try:
-                                user_id = args[0]
-                                audio_data = args[1] if len(args) > 1 else None
-                                audio_length = len(
-                                    audio_data) if audio_data else 0
-                                logger.debug(
-                                    "Audio received from user %s, length: %d",
-                                    user_id, audio_length)
-                            except (IndexError, TypeError, AttributeError):
-                                # Just silently handle any exceptions in the logging
-                                pass
+                        logger.debug("Audio callback executed successfully")
                     except Exception as e:
-                        # Catch any unexpected errors in audio processing
-                        logger.warning(
-                            "Audio callback error (non-critical): %s", str(e))
+                        logger.error("Audio callback error: %s", str(e))
                     return
-                # Return the coroutine object
                 return robust_process()
 
-            # CRITICAL: Monkey patch Discord's voice client to handle decryption errors
+            # Monkey patch Discord's voice client to handle decryption errors
             original_unpack_audio = voice_client.unpack_audio
 
             def safe_unpack_audio(data):
                 try:
                     return original_unpack_audio(data)
                 except (IndexError, struct.error, ValueError, TypeError, AttributeError) as e:
-                    # Log the error but don't crash the thread
                     logger.warning(
                         "Discord audio packet corruption (ignoring): %s", str(e))
-                    return  # Skip this packet
-                # pylint: disable-next=broad-except
+                    return
                 except Exception as e:
-                    # Catch ANY other unexpected Discord.py errors
                     logger.error(
                         "Unexpected Discord audio error (ignoring): %s", str(e))
-                    return  # Skip this packet
+                    return
 
             # Apply the patch
             voice_client.unpack_audio = safe_unpack_audio
@@ -217,8 +447,8 @@ class VoiceTranslator:
 
     async def stop_listening(self, voice_client):
         """Stop listening and processing audio"""
-        logger.debug(
-            "stop_listening called. Voice client valid: %s", voice_client is not None)
+        logger.debug("stop_listening called. Voice client valid: %s",
+                     voice_client is not None)
         if not voice_client:
             logger.debug("Voice client is None, returning")
             return False, "Not connected to a voice channel"
@@ -235,23 +465,18 @@ class VoiceTranslator:
 
             # Clean up sink resources
             if self.sink:
-                # Add extra safeguards before cleanup
                 try:
-                    logger.debug("Cleaning up sink resources")
+                    logger.debug("Cleaning up sink")
                     self.sink.cleanup()
                     logger.debug("Sink cleanup completed")
-                    # Wait for workers to finish
-                    await asyncio.sleep(CLEANUP_DELAY)
                 except (AttributeError, RuntimeError) as e:
-                    logger.warning("Error during sink cleanup: %s", str(e))
+                    logger.error("Error during sink cleanup: %s", str(e))
                 self.sink = None
                 logger.debug("Sink reference cleared")
 
-            # Make sure the listening state is updated
             self.is_listening = False
             logger.debug("Stopped listening")
 
-            # Return success
             return True, "Stopped listening"
         except (ConnectionError, AttributeError) as e:
             logger.error("Error in stop_listening: %s", str(e))
@@ -269,42 +494,18 @@ class VoiceTranslator:
             logger.debug(
                 "🔄 process_audio_callback called for user %s with message_type: %s", user_id, message_type)
 
-            # If we're called with a message_type, it's a direct text message,
-            # not an audio file
+            # If we're called with a message_type, it's a direct text message
             if message_type is not None:
-                # Here audio_file is actually the text content when
-                # message_type is provided
                 text_content = audio_file
                 logger.info("📝 Received %s for user %s: %s",
                             message_type, user_id, text_content)
 
                 # Forward to translation callback
                 if self.translation_callback:
-                    try:
-                        logger.debug(
-                            "🔄 Forwarding to translation_callback for user %s", user_id)
-                        await self.translation_callback(user_id, text_content, message_type=message_type)
-                        logger.info(
-                            "✅ Successfully forwarded %s to translation_callback for user %s: %s", message_type, user_id, text_content)
-                    except (TypeError, AttributeError, ValueError) as cb_error:
-                        logger.error(
-                            "❌ Error in translation callback: %s", str(cb_error))
-                        import traceback
-                        logger.debug(
-                            "Translation callback error traceback: %s", traceback.format_exc())
-
-                        # Try fallback without message_type
-                        try:
-                            logger.debug(
-                                "🔄 Trying fallback callback without message_type")
-                            await self.translation_callback(user_id, text_content)
-                            logger.info(
-                                "✅ Fallback callback succeeded for user %s", user_id)
-                        except Exception as fallback_error:
-                            logger.error(
-                                "❌ Fallback callback failed: %s", str(fallback_error))
+                    await self.translation_callback(user_id, text_content, message_type=message_type)
                 else:
-                    logger.error("❌ No translation_callback available!")
+                    logger.warning(
+                        "No translation callback available for user %s", user_id)
                 return
 
             # If we get here, it's an audio file processing request (legacy path)
@@ -324,8 +525,7 @@ class VoiceTranslator:
                 # Skip processing if transcription was empty
                 if not transcribed_text:
                     logger.debug(
-                        "Empty transcription for user %s, skipping", user_id)
-                    await self._force_delete_file(audio_file)
+                        "Empty transcription result for user %s, skipping", user_id)
                     return
 
                 # Create transcription message
@@ -334,31 +534,19 @@ class VoiceTranslator:
                 await self.translation_callback(user_id, transcribed_text, message_type="transcription")
 
                 # Determine if translation is needed
-                needs_translation = await utils.should_translate(transcribed_text, detected_language)
+                needs_translation = await translation.should_translate(transcribed_text, detected_language)
 
                 if needs_translation:
-                    translated_text = await utils.translate(transcribed_text)
-                    logger.info("Translated from %s to English",
-                                detected_language)
-                    # Send the translation
-                    logger.info("Sending translation for user %s: %s",
-                                user_id, translated_text)
+                    translated_text = await translation.translate(transcribed_text, target_language='en')
                     await self.translation_callback(user_id, translated_text, message_type="translation")
                 else:
-                    # Skip translation for English
-                    logger.debug(
-                        "Skipped translation - detected language: %s", detected_language)
-                    # For English, use the same text for translation display
-                    logger.info("Sending direct text for user %s: %s",
-                                user_id, transcribed_text)
                     await self.translation_callback(user_id, transcribed_text, message_type="translation")
             finally:
-                # CRITICAL: Always delete the file when done with it
+                # Always delete the file when done with it
                 await self._force_delete_file(audio_file)
 
         except (OSError, RuntimeError, ValueError) as e:
             logger.error("Error in process_audio_callback: %s", str(e))
-            import traceback
             logger.debug("Process audio callback error traceback: %s",
                          traceback.format_exc())
             # Make sure to clean up even if exception occurs
@@ -407,7 +595,6 @@ class VoiceTranslator:
 
     def _cleanup_audio_file(self, audio_file):
         """Legacy method for compatibility - use _force_delete_file instead."""
-        # Run the async delete in a non-blocking way
         if audio_file and os.path.exists(audio_file):
             asyncio.create_task(self._force_delete_file(audio_file))
 
@@ -417,9 +604,7 @@ class VoiceTranslator:
         for guild_id, voice_client in list(self.active_voices.items()):
             try:
                 if voice_client.is_connected():
-                    if self.is_listening:
-                        voice_client.stop_recording()
-                    asyncio.create_task(voice_client.disconnect())
+                    voice_client.stop_recording()
             except (AttributeError, ConnectionError) as e:
                 logger.error(
                     "Error during cleanup for guild %s: %s", guild_id, str(e))
@@ -431,3 +616,14 @@ class VoiceTranslator:
 
         self.active_voices = {}
         self.is_listening = False
+
+        try:
+            if hasattr(self, 'active_voices'):
+                self.active_voices.clear()
+            if hasattr(self, 'connected_users'):
+                self.connected_users.clear()
+            if hasattr(self, 'user_processing_enabled'):
+                self.user_processing_enabled.clear()
+            logger.info("✅ VoiceTranslator cleanup completed")
+        except Exception as e:
+            logger.error("❌ Error during VoiceTranslator cleanup: %s", str(e))

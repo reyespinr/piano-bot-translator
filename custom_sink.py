@@ -15,19 +15,22 @@ Features:
 import asyncio
 import os
 import time
-import io
 import wave
 import queue
 import threading
 import gc
 import subprocess
 import traceback
+import uuid
+import struct
+import io
+import numpy as np
 from dataclasses import dataclass
 from queue import Queue
 from typing import Optional, Callable, Awaitable
-import numpy as np
 from discord.sinks import WaveSink
 import utils
+import translation
 from logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -97,8 +100,7 @@ class WorkerManager:
     def __post_init__(self):
         """Initialize mutable default values."""
         if self.queue is None:
-            # CRITICAL FIX: Increase queue size significantly to handle busy conversations
-            self.queue = queue.Queue(maxsize=50)  # Increased from 10 to 50
+            self.queue = Queue(maxsize=50)
         if self.workers is None:
             self.workers = []
 
@@ -190,6 +192,100 @@ class RealTimeWaveSink(WaveSink):
             self.users[user] = UserState()
         return self.users[user]
 
+    def write(self, data, user):
+        """Process incoming audio data from Discord."""
+        try:
+            # PROTECTION: Validate incoming audio data before processing
+            if not data or len(data) < 4:
+                return
+
+            current_time = time.time()
+
+            # Check if user is enabled for processing - CRITICAL LOGIC
+            if (hasattr(self, 'parent') and
+                    self.parent and
+                    hasattr(self.parent, 'user_processing_enabled')):
+                if not self.parent.user_processing_enabled.get(str(user), True):
+                    # Still write to main buffer but skip processing
+                    try:
+                        super().write(data, user)
+                    except Exception as e:
+                        logger.debug(
+                            "Error writing to main buffer for disabled user %s: %s", user, str(e))
+                    return
+
+            # Continue with normal audio processing for enabled users
+            # Update last activity time when any audio is processed
+            self.session.last_activity_time = current_time
+
+            # Initialize user-specific data structures if needed
+            user_state = self._get_user_state(user)
+
+            # First time seeing this user?
+            if user_state.last_packet_time == 0:
+                logger.debug("First audio packet from user %s", user)
+                user_state.last_packet_time = current_time
+                user_state.last_active_time = current_time
+
+            # PROTECTION: Validate audio data for activity detection
+            try:
+                is_active = self.is_audio_active(data, user)
+            except (ValueError, TypeError, OverflowError) as e:
+                logger.debug(
+                    "Audio activity detection failed for user %s: %s", user, str(e))
+                is_active = False
+
+            # Update last active time if speech is detected
+            if is_active:
+                user_state.last_active_time = current_time
+
+            # Calculate time differences
+            time_diff = current_time - user_state.last_packet_time
+            active_diff = current_time - user_state.last_active_time
+
+            # CRITICAL FIX: Only process long pause if we actually have speech detected
+            # And increase the pause threshold to prevent the crazy loop
+            if (user_state.is_speaking and
+                    user_state.speech_detected and
+                    active_diff > 2.0):  # Increased from 0.8 to 2.0 seconds
+                self._process_silent_speech(user)
+
+            # CRITICAL FIX: Increase pause threshold and add rate limiting
+            if time_diff > 2.0:  # Increased from 1.0 to 2.0 seconds
+                # Add rate limiting to prevent log spam
+                now = time.time()
+                last_log_time = self.last_block_log_time.get(user, 0)
+                if now - last_log_time > 5.0:  # Only log once every 5 seconds per user
+                    logger.debug(
+                        "Long pause detected for user %s. Processing any speech and resetting.", user)
+                    self.last_block_log_time[user] = now
+
+                self._handle_long_pause(user)
+
+            # Store recent frames for smoother beginning of speech
+            self._update_pre_speech_buffer(user, data)
+
+            if is_active:
+                self._handle_active_speech(user, data)
+            else:
+                self._handle_silence(user, data)
+
+            user_state.last_packet_time = current_time
+
+            # PROTECTION: Write to the main buffer with error handling
+            try:
+                super().write(data, user)
+            except Exception as e:
+                logger.debug(
+                    "Error writing to main buffer for user %s: %s", user, str(e))
+
+        except (KeyError, TypeError, ValueError, AttributeError, IOError, RuntimeError) as e:
+            logger.error("Error in write method for user %s: %s", user, str(e))
+        except Exception as e:
+            # Catch any other unexpected errors to prevent thread crashes
+            logger.error(
+                "Unexpected error in write method for user %s: %s", user, str(e))
+
     def is_audio_active(self, audio_data, user):
         """Check if audio data contains active speech."""
         try:
@@ -212,7 +308,7 @@ class RealTimeWaveSink(WaveSink):
 
             # Initialize energy history if needed
             if not user_state.energy_history:
-                user_state.energy_history = [energy] * 5
+                user_state.energy_history = []
 
             # Update energy history
             user_state.energy_history.append(energy)
@@ -222,127 +318,13 @@ class RealTimeWaveSink(WaveSink):
             # Calculate average energy over recent frames
             avg_energy = np.mean(user_state.energy_history)
 
-            # Return if audio is considered active speech
-            return avg_energy > 300  # Threshold for speech detection
+            # IMPROVED: Slightly lower threshold for better sensitivity
+            return avg_energy > 250  # Reduced from 300 for better pickup
 
         except (ValueError, TypeError, OverflowError, np.core._exceptions._ArrayMemoryError) as e:
             logger.warning(
                 "Audio activity detection error for user %s: %s", user, str(e))
             return False  # Default to inactive for corrupted audio
-
-    def write(self, data, user):
-        """Process incoming audio data from Discord."""
-        try:
-            # PROTECTION: Validate incoming audio data before processing
-            if not data or len(data) < 4:  # Minimum valid audio packet size
-                logger.debug("Skipping invalid/corrupted audio packet for user %s (size: %d)",
-                             user, len(data) if data else 0)
-                return
-
-            current_time = time.time()
-
-            # Check if user is enabled for processing - CRITICAL LOGIC
-            if (hasattr(self, 'parent') and
-                    self.parent and
-                    hasattr(self.parent, 'user_processing_enabled')):
-
-                # IMPORTANT: Force user ID to string type for consistency
-                user_id = str(user)
-
-                # COMPLETELY REDESIGNED: Check the actual dictionary at runtime for each packet
-                if user_id in self.parent.user_processing_enabled:
-                    # Get the CURRENT value directly from the dictionary (not a cached value)
-                    enabled = bool(
-                        self.parent.user_processing_enabled[user_id])
-
-                    if not enabled:
-                        if user_id not in self.last_block_log_time:
-                            logger.debug(
-                                "User %s audio processing disabled", user_id)
-                            self.last_block_log_time[user_id] = current_time
-                        # PROTECTION: Still call super().write() even for disabled users to prevent Discord.py issues
-                        try:
-                            super().write(data, user)
-                        except Exception as e:
-                            logger.warning(
-                                "Discord write error for disabled user %s: %s", user_id, str(e))
-                        return
-
-                else:
-                    # Don't automatically enable users - require explicit setting
-                    logger.info(
-                        "New user %s detected, requiring manual enable", user_id)
-                    self.parent.user_processing_enabled[user_id] = False
-                    # PROTECTION: Still call super().write() to prevent Discord.py issues
-                    try:
-                        super().write(data, user)
-                    except Exception as e:
-                        logger.warning(
-                            "Discord write error for new user %s: %s", user_id, str(e))
-                    return
-
-            # Continue with normal audio processing for enabled users
-            # Update last activity time when any audio is processed
-            self.session.last_activity_time = current_time
-
-            # Initialize user-specific data structures if needed
-            user_state = self._get_user_state(user)
-
-            # First time seeing this user?
-            if user_state.last_packet_time == 0:
-                user_state.last_packet_time = current_time
-
-            # PROTECTION: Validate audio data for activity detection
-            try:
-                # Check if the current packet contains active speech
-                is_active = self.is_audio_active(data, user)
-            except (ValueError, TypeError, OverflowError) as e:
-                logger.warning(
-                    "Audio activity detection failed for user %s: %s", user, str(e))
-                is_active = False  # Default to inactive for corrupted packets
-
-            # Update last active time if speech is detected
-            if is_active:
-                user_state.last_active_time = current_time
-
-            # Calculate time differences
-            time_diff = current_time - user_state.last_packet_time
-            active_diff = current_time - user_state.last_active_time
-
-            # Process speech if silent for too long
-            if (user_state.is_speaking and
-                    user_state.speech_detected and
-                    active_diff > self.config.force_process_timeout):
-                self._process_silent_speech(user)
-
-            # Handle long pauses
-            if time_diff > self.config.pause_threshold:
-                self._handle_long_pause(user)
-
-            # Store recent frames for smoother beginning of speech
-            self._update_pre_speech_buffer(user, data)
-
-            if is_active:
-                self._handle_active_speech(user, data)
-            else:
-                # Update the last packet time
-                self._handle_silence(user, data)
-            user_state.last_packet_time = current_time
-
-            # PROTECTION: Write to the main buffer with error handling
-            try:
-                super().write(data, user)
-            except Exception as e:
-                logger.warning(
-                    "Discord super().write() error for user %s: %s", user, str(e))
-                # Continue processing even if Discord.py write fails
-
-        except (KeyError, TypeError, ValueError, AttributeError, IOError, RuntimeError) as e:
-            logger.error("Error in write method for user %s: %s", user, str(e))
-        except Exception as e:
-            # Catch any other unexpected errors to prevent thread crashes
-            logger.error(
-                "Unexpected error in write method for user %s: %s", user, str(e))
 
     def _update_pre_speech_buffer(self, user, data):
         """Update the pre-speech buffer for smoother speech beginning."""
@@ -400,7 +382,11 @@ class RealTimeWaveSink(WaveSink):
                 user_state.speech_buffer.write(pre_data)
 
         # Add this audio data to the speech buffer
-        user_state.speech_buffer.write(data)
+        try:
+            user_state.speech_buffer.write(data)
+        except (IOError, OSError) as e:
+            logger.warning(
+                "Failed to write speech data for user %s: %s", user, str(e))
 
     def _handle_silence(self, user, data):
         """Handle silence after speech."""
@@ -408,7 +394,11 @@ class RealTimeWaveSink(WaveSink):
 
         # Add a few frames to the speech buffer for smoother transitions
         if user_state.is_speaking and user_state.silence_frames < 5:
-            user_state.speech_buffer.write(data)
+            try:
+                user_state.speech_buffer.write(data)
+            except (IOError, OSError) as e:
+                logger.warning(
+                    "Failed to write silence data for user %s: %s", user, str(e))
 
         # Increment silence counter
         # Check if silence has persisted long enough to consider speech ended
@@ -417,69 +407,11 @@ class RealTimeWaveSink(WaveSink):
                 user_state.silence_frames > self.config.silence_threshold):
             logger.debug("Speech ended for user %s. Processing audio.", user)
             # Only process if speech was detected in this session
-            user_state.is_speaking = False
             if user_state.speech_detected:
                 self.process_speech_buffer(user)
                 user_state.speech_detected = False
+                user_state.silence_frames = 0
                 user_state.speech_buffer = io.BytesIO()
-
-    def _transcription_worker(self):
-        """Background worker to process transcription queue."""
-        thread_name = threading.current_thread().name
-        logger.info("%s started", thread_name)
-
-        while self.workers.running:
-            try:
-                # Get item from queue with timeout
-                audio_file, user = self.workers.queue.get(timeout=1)
-                logger.info("%s processing audio for user %s: %s",
-                            thread_name, user, audio_file)
-
-                # CRITICAL FIX: Use asyncio.run for clean event loop management
-                try:
-                    # Use asyncio.run which properly creates and cleans up the event loop
-                    result = asyncio.run(
-                        self.transcribe_audio(audio_file, user))
-                    logger.debug(
-                        "%s completed transcription for user %s", thread_name, user)
-                except Exception as transcription_error:
-                    logger.error("%s transcription failed for user %s: %s",
-                                 thread_name, user, str(transcription_error))
-                    import traceback
-                    logger.debug("Transcription error traceback: %s",
-                                 traceback.format_exc())
-
-                    # Clean up the file since transcription failed
-                    if os.path.exists(audio_file):
-                        try:
-                            os.remove(audio_file)
-                            logger.debug(
-                                "Cleaned up failed audio file: %s", audio_file)
-                        except OSError as e:
-                            logger.warning(
-                                "Failed to clean up failed file %s: %s", audio_file, e)
-
-                # CRITICAL: Always mark task as done
-                self.workers.queue.task_done()
-
-                # Brief pause between processing
-                time.sleep(0.1)
-
-            except queue.Empty:
-                # No items in queue, continue waiting
-                continue
-            except Exception as e:
-                logger.error("%s unexpected error: %s", thread_name, str(e))
-                import traceback
-                logger.error("Worker error traceback: %s",
-                             traceback.format_exc())
-                # Try to mark task as done if we got something from queue
-                try:
-                    self.workers.queue.task_done()
-                except ValueError:
-                    pass  # task_done called too many times, ignore
-
-        logger.info("%s stopped", thread_name)
 
     def process_speech_buffer(self, user):
         """Process the speech buffer for a user and queue for transcription."""
@@ -494,7 +426,7 @@ class RealTimeWaveSink(WaveSink):
         # Also check minimum buffer size (Discord audio is 192KB/sec, so minimum ~38KB for 0.2s)
         user_state.speech_buffer.seek(0, os.SEEK_END)
         buffer_size = user_state.speech_buffer.tell()
-        min_buffer_size = 38400  # ~0.2 seconds of audio
+        min_buffer_size = 25000  # Reduced from 38400 (~0.13s instead of 0.2s)
 
         if duration_seconds < min_duration or buffer_size < min_buffer_size:
             logger.debug("Speech too short (%.2fs < %.2fs)" +
@@ -502,227 +434,165 @@ class RealTimeWaveSink(WaveSink):
                          duration_seconds, min_duration, buffer_size, min_buffer_size)
             return
 
-        # Check if user is on cooldown
+        # IMPROVED: Reduce cooldown for better responsiveness
         if user_state.last_processed_time > 0:
             time_since_last = current_time - user_state.last_processed_time
-            if time_since_last < 2.0:
+            if time_since_last < 1.5:
                 logger.debug("Cooldown active for user %s, skipping.", user)
-                return        # Create and process audio file
+                return
+
+        # Create and process audio file
         self._create_and_queue_audio_file(user, user_state, current_time)
 
+    def _create_and_queue_audio_file(self, user, user_state, current_time):
+        """Create audio file and queue for transcription."""
+        try:
+            # Create unique filename
+            audio_filename = f"speech_{user}_{int(current_time * 1000)}.wav"
+
+            # Write audio buffer to file
+            user_state.speech_buffer.seek(0)
+            audio_data = user_state.speech_buffer.read()
+
+            with wave.open(audio_filename, 'wb') as wav_file:
+                wav_file.setnchannels(2)  # Discord uses stereo
+                wav_file.setsampwidth(2)  # 16-bit
+                wav_file.setframerate(48000)  # Discord sample rate
+                wav_file.writeframes(audio_data)
+
+            # Queue for transcription
+            try:
+                self.workers.queue.put((user, audio_filename), timeout=1.0)
+                user_state.last_processed_time = current_time
+                logger.debug("Queued audio file for user %s: %s",
+                             user, audio_filename)
+            except queue.Full:
+                logger.warning(
+                    "Transcription queue full, dropping audio for user %s", user)
+                os.remove(audio_filename)
+
+        except Exception as e:
+            logger.error(
+                "Error creating audio file for user %s: %s", user, str(e))
+
     def _update_session_state(self, user):
-        """Update session state based on user activity and timing."""
+        """Update session state and return current time."""
         current_time = time.time()
 
-        # Check for new conversation session
+        # Update session tracking
         if user not in self.session.current_speakers:
-            logger.info("New speaker detected: %s", user)
-            self.session.state = "new"
-            self.session.start_time = current_time
             self.session.current_speakers.add(user)
             self.session.last_speaker_change = current_time
 
-        # Check for extended silence
-        if current_time - self.session.last_activity_time > 10:
-            logger.info(
-                "Long silence detected, starting new conversation session")
-            self.session.state = "new"
-            self.session.start_time = current_time
-
-        # Session state transitions
-        time_in_session = current_time - self.session.start_time
-        if self.session.state == "new" and time_in_session > 30:
-            self.session.state = "active"
-            logger.info("Session transitioned to active state")
-        elif self.session.state == "active" and time_in_session > 120:
-            self.session.state = "established"
-            logger.info("Session transitioned to established state")
-
-        # Update tracking variables
         self.session.last_activity_time = current_time
+
+        # Update session state based on activity
+        session_duration = current_time - self.session.start_time
+        if session_duration > 30:  # 30 seconds
+            self.session.state = "established"
+        elif len(self.session.current_speakers) > 1:
+            self.session.state = "active"
+
         return current_time
 
     def _get_audio_duration(self, speech_buffer):
         """Calculate audio duration from buffer size."""
+        if not speech_buffer:
+            return 0.0
+
+        # Get buffer size
         speech_buffer.seek(0, os.SEEK_END)
-        # Calculate approximate duration (48000 Hz, 16-bit stereo)
         buffer_size = speech_buffer.tell()
-        return buffer_size / 192000
+
+        # Discord audio is 48kHz, 16-bit, stereo = 192,000 bytes per second
+        bytes_per_second = 48000 * 2 * 2  # sample_rate * channels * bytes_per_sample
+        duration = buffer_size / bytes_per_second
+
+        return duration
 
     def _get_minimum_duration(self):
-        """Get minimum duration threshold based on session state and queue size."""
-        queue_not_busy = self.workers.queue.qsize() < 3
-
+        """Get minimum duration based on session state."""
         if self.session.state == "new":
-            # More permissive in new conversations
-            min_duration = 0.75 if queue_not_busy else 1.5
-            logger.debug("Using new session threshold: %.2fs", min_duration)
+            return 0.3  # 300ms for new sessions
         elif self.session.state == "active":
-            # Normal threshold for active sessions
-            min_duration = 1.0 if queue_not_busy else 2.0
+            return 0.2  # 200ms for active sessions
         else:  # established
-            # More strict for established conversations
-            min_duration = 1.25 if queue_not_busy else 2.25
+            return 0.15  # 150ms for established sessions
 
-        return min_duration
+    def _transcription_worker(self):
+        """Background worker to process transcription queue."""
+        thread_name = threading.current_thread().name
+        logger.info("%s started", thread_name)
 
-    def _create_and_queue_audio_file(self, user, user_state, current_time):
-        """Create WAV file from buffer and add to transcription queue."""
-        # Create a temporary WAV file
-        timestamp = int(time.time())
-        temp_audio_file = f"{user}_{timestamp}_speech.wav"
-
+        # CRITICAL FIX: Create a proper event loop for this worker thread
+        loop = None
         try:
-            # Write the speech data to a WAV file
-            user_state.speech_buffer.seek(0)  # Reset buffer pointer
-            audio_data = user_state.speech_buffer.read()
-
-            # ENHANCED VALIDATION: Check for valid audio data
-            if len(audio_data) < 1920:  # Less than ~10ms of audio
-                logger.debug(
-                    "Audio data too small (%d bytes), skipping.", len(audio_data))
-                return
-
-            # NEW: Validate audio data integrity before creating WAV
-            if not self._validate_audio_data(audio_data):
-                logger.warning(
-                    "Audio data validation failed for user %s, skipping", user)
-                return
-
-            with open(temp_audio_file, 'wb') as out_f:
-                wf = wave.Wave_write(out_f)
-                wf.setnchannels(2)  # Stereo
-                wf.setsampwidth(2)  # 16-bit
-                wf.setframerate(48000)  # 48kHz (Discord's standard)
-                wf.writeframes(audio_data)
-                wf.close()
-
-            # ADDITIONAL: Validate the created WAV file
-            if not self._validate_wav_file(temp_audio_file):
-                logger.warning(
-                    "Generated WAV file is invalid for user %s, skipping", user)
-                if os.path.exists(temp_audio_file):
-                    os.remove(temp_audio_file)
-                return
-
-            logger.info("Processing speech for user %s, audio file size: %d bytes",
-                        user, os.path.getsize(temp_audio_file))
-
-            # CRITICAL FIX: Check queue space and add more details about queue state
-            current_queue_size = self.workers.queue.qsize()
-            max_queue_size = self.workers.queue.maxsize
-
-            logger.debug("Queue status: %d/%d items",
-                         current_queue_size, max_queue_size)
-
-            # Add to transcription queue with non-blocking put
-            try:
-                self.workers.queue.put((temp_audio_file, user), block=False)
-                logger.debug(
-                    "✅ Added transcription task to queue for user %s (queue: %d/%d)",
-                    user, current_queue_size + 1, max_queue_size)
-                user_state.last_processed_time = current_time
-            except queue.Full:
-                logger.warning(
-                    "❌ Transcription queue full (%d/%d), skipping audio for user %s",
-                    current_queue_size, max_queue_size, user)
-                # Clean up the file since we can't process it
-                try:
-                    os.remove(temp_audio_file)
-                    logger.debug(
-                        "Cleaned up skipped audio file: %s", temp_audio_file)
-                except OSError as e:
-                    logger.warning(
-                        "Failed to clean up skipped file: %s", str(e))
-
-        except (IOError, OSError, wave.Error) as e:
-            logger.error("Error creating WAV file for user %s: %s", user, e)
-            # Clean up if file was created
-            if os.path.exists(temp_audio_file):
-                try:
-                    os.remove(temp_audio_file)
-                except OSError:
-                    pass
-
-    def _validate_audio_data(self, audio_data):
-        """Validate raw audio data before processing."""
-        try:
-            # Check minimum size
-            if len(audio_data) < 3840:  # ~20ms minimum
-                return False
-
-            # Check if data is not all zeros (complete silence)
-            if all(b == 0 for b in audio_data):
-                logger.debug("Audio data is all zeros (complete silence)")
-                return False
-
-            # Convert to numpy array and check for valid range
-            try:
-                audio_array = np.frombuffer(audio_data, dtype=np.int16)
-
-                # Check for NaN or infinite values
-                if not np.isfinite(audio_array).all():
-                    logger.debug("Audio data contains NaN or infinite values")
-                    return False
-
-                # Check if audio has reasonable amplitude range
-                max_amplitude = np.max(np.abs(audio_array))
-                if max_amplitude < 50:  # Very quiet audio might be corrupted
-                    logger.debug("Audio amplitude too low: %d", max_amplitude)
-                    return False
-
-                return True
-
-            except (ValueError, TypeError) as e:
-                logger.debug("Audio data conversion failed: %s", str(e))
-                return False
-
+            # CRITICAL FIX: Don't try to get existing loop, always create new one
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            logger.debug("%s created new event loop", thread_name)
         except Exception as e:
-            logger.warning("Audio validation error: %s", str(e))
-            return False
+            logger.error("%s failed to create event loop: %s",
+                         thread_name, str(e))
+            return
 
-    def _validate_wav_file(self, file_path):
-        """Validate that the created WAV file is readable."""
+        while self.workers.running:
+            audio_file = None
+            user = None
+
+            try:
+                # Get item from queue with timeout
+                user, audio_file = self.workers.queue.get(
+                    timeout=1.0)  # CRITICAL FIX: Correct order
+                logger.debug("%s processing: %s for user %s",
+                             thread_name, audio_file, user)
+
+                # Process the transcription
+                loop.run_until_complete(
+                    self.transcribe_audio(audio_file, user))
+
+            except queue.Empty:
+                continue  # No work available, continue loop
+
+            except Exception as e:
+                logger.error("%s error processing queue item: %s",
+                             thread_name, str(e))
+                # Clean up the audio file if processing failed
+                if audio_file and os.path.exists(audio_file):
+                    try:
+                        os.remove(audio_file)
+                        logger.debug(
+                            "Cleaned up failed audio file: %s", audio_file)
+                    except Exception as cleanup_error:
+                        logger.debug(
+                            "Failed to cleanup audio file: %s", str(cleanup_error))
+                continue
+
+            finally:
+                # Mark task as done if we got an item
+                if 'audio_file' in locals() and audio_file is not None:
+                    self.workers.queue.task_done()
+
+        # CRITICAL FIX: Properly close the event loop when worker exits
         try:
-            with wave.open(file_path, 'rb') as wf:
-                # Check basic properties
-                if wf.getnchannels() != 2:
-                    logger.debug(
-                        "WAV file has wrong channel count: %d", wf.getnchannels())
-                    return False
+            if loop and not loop.is_closed():
+                loop.close()
+                logger.debug("%s closed event loop", thread_name)
+        except Exception as e:
+            logger.error("%s error closing event loop: %s",
+                         thread_name, str(e))
 
-                if wf.getsampwidth() != 2:
-                    logger.debug(
-                        "WAV file has wrong sample width: %d", wf.getsampwidth())
-                    return False
-
-                if wf.getframerate() != 48000:
-                    logger.debug(
-                        "WAV file has wrong sample rate: %d", wf.getframerate())
-                    return False
-
-                # Try to read a few frames to ensure file is not corrupted
-                frames = wf.readframes(100)
-                if len(frames) < 100:
-                    logger.debug("WAV file too short: %d frames", len(frames))
-                    return False
-
-                return True
-
-        except (wave.Error, IOError, OSError) as e:
-            logger.debug("WAV file validation failed: %s", str(e))
-            return False
+        logger.debug("%s exiting", thread_name)
 
     async def transcribe_audio(self, audio_file, user):
         """Transcribe the audio file with smart model routing and update the GUI with results."""
         logger.debug(
-            "Starting transcription for user %s, file: %s", user, audio_file)
+            "🔄 Starting transcription for user %s, file: %s", user, audio_file)
 
         try:
             # Skip if file doesn't exist
             if not os.path.exists(audio_file):
-                logger.warning(
-                    "Audio file %s does not exist, skipping.", audio_file)
+                logger.warning("Audio file not found: %s", audio_file)
                 return
 
             transcribed_text = None
@@ -730,126 +600,70 @@ class RealTimeWaveSink(WaveSink):
 
             try:
                 logger.debug(
-                    "Calling utils.transcribe for file: %s", audio_file)
-
-                # Get current queue size for smart routing
-                current_queue_size = self.workers.queue.qsize()
-
-                # Get transcription with smart model routing
-                transcribed_text, detected_language = await utils.transcribe(
-                    audio_file, current_queue_size=current_queue_size
-                )
-
-                logger.debug("Transcription result for user %s: text='%s', language=%s",
-                             user, transcribed_text[:50] if transcribed_text else "None", detected_language)
-
-                # Skip processing if transcription was empty (failed confidence check)
-                if not transcribed_text:
-                    logger.debug(
-                        "Empty transcription for user %s, skipping processing.", user)
-                    return  # Will be cleaned up in finally block
-
-                logger.info("✅ Transcription for user %s: %s",
-                            user, transcribed_text)
+                    "📞 Calling utils.transcribe for file: %s", audio_file)
+                transcribed_text, detected_language = await utils.transcribe(audio_file)
+                logger.debug("🎯 Transcription result for user %s: text='%s', language=%s",
+                             user, transcribed_text, detected_language)
 
             except Exception as e:
                 logger.error(
-                    "Error during transcription for user %s: %s", user, str(e))
-                import traceback
-                logger.debug("Transcription error traceback: %s",
-                             traceback.format_exc())
-                return  # Will be cleaned up in finally block
+                    "Transcription failed for user %s: %s", user, str(e))
+                return
 
-            # CRITICAL FIX: Process the transcription and translation synchronously in this async context
+            # Skip processing if transcription was empty (failed confidence check)
+            if not transcribed_text or not transcribed_text.strip():
+                logger.debug("Empty transcription result for user %s", user)
+                return
+
+            logger.info("✅ Transcription for user %s: %s",
+                        user, transcribed_text)
+
+            # CRITICAL FIX: Process the transcription and translation
             try:
-                # Determine if translation is needed
-                needs_translation = await utils.should_translate(transcribed_text, detected_language)
-                logger.debug("Translation needed for user %s: %s",
-                             user, needs_translation)
+                logger.debug("📡 Sending transcription for user %s", user)
+                await self._update_gui(user, transcribed_text, None, "transcription")
 
-                if needs_translation:
-                    try:
-                        translated_text = await utils.translate(transcribed_text)
-                        logger.info("✅ Translated from %s to English for user %s: %s",
-                                    detected_language, user, translated_text)
-                    except Exception as e:
-                        logger.error(
-                            "Translation failed for user %s: %s", user, str(e))
-                        translated_text = transcribed_text  # Fallback to original text
-                else:
-                    # Skip translation for English or empty text
-                    translated_text = transcribed_text
+                # Check if translation is needed
+                logger.debug("🌐 Starting translation check for user %s", user)
+                should_translate_result = await utils.should_translate(transcribed_text, detected_language)
+                logger.debug("🔍 Translation needed for user %s: %s",
+                             user, should_translate_result)
+
+                if should_translate_result:
+                    # Translate the text
+                    logger.debug("🌍 Translating text for user %s", user)
+                    translated_text = await utils.translate(transcribed_text, target_lang='en')
                     logger.debug(
-                        "No translation needed for user %s (language: %s)", user, detected_language)
+                        "🌍 Translation result for user %s: %s", user, translated_text)
 
-                # CRITICAL FIX: Always try to send the callback regardless of GUI updates
-                if self.translation_callback is not None:
-                    logger.debug(
-                        "🔄 Calling translation callback for user %s", user)
-
-                    try:
-                        # Send transcription first
-                        await self.translation_callback(user, transcribed_text, message_type="transcription")
-                        logger.info(
-                            "📤 Sent transcription callback for user %s: %s", user, transcribed_text)
-
-                        # Then send translation
-                        await self.translation_callback(user, translated_text, message_type="translation")
-                        logger.info(
-                            "📤 Sent translation callback for user %s: %s", user, translated_text)
-
-                    except TypeError as e:
-                        # Try without message_type parameter as a fallback
-                        logger.warning(
-                            "Callback TypeError for user %s: %s, trying fallback", user, str(e))
-                        try:
-                            await self.translation_callback(user, transcribed_text)
-                            logger.info(
-                                "📤 Sent fallback transcription callback for user %s", user)
-
-                            if transcribed_text != translated_text:
-                                await self.translation_callback(user, translated_text)
-                                logger.info(
-                                    "📤 Sent fallback translation callback for user %s", user)
-                        except Exception as fallback_error:
-                            logger.error(
-                                "❌ Fallback callback also failed for user %s: %s", user, str(fallback_error))
-
-                    except Exception as callback_error:
-                        logger.error(
-                            "❌ Translation callback failed for user %s: %s", user, str(callback_error))
-                        import traceback
-                        logger.debug("Callback error traceback: %s",
-                                     traceback.format_exc())
+                    if translated_text and translated_text.strip():
+                        logger.debug("📡 Sending translation for user %s", user)
+                        await self._update_gui(user, translated_text, None, "translation")
+                    else:
+                        logger.warning("Translation failed for user %s", user)
                 else:
-                    logger.error(
-                        "❌ No translation_callback available for user %s", user)
+                    # CRITICAL FIX: Even if no translation is needed (English),
+                    # still send the original text to the translation container
+                    logger.debug(
+                        "⏭️ No translation needed for user %s (language: %s), sending original text to translation container", user, detected_language)
+                    await self._update_gui(user, transcribed_text, None, "translation")
 
             except Exception as e:
                 logger.error(
-                    "Error during translation processing for user %s: %s", user, str(e))
-                import traceback
-                logger.debug(
-                    "Translation processing error traceback: %s", traceback.format_exc())
+                    "Error processing transcription/translation for user %s: %s", user, str(e))
 
         except Exception as e:
             logger.error(
-                "Unexpected error during transcription/translation for user %s: %s", user, str(e))
-            import traceback
-            logger.error("Full traceback: %s", traceback.format_exc())
+                "Error in transcribe_audio for user %s: %s", user, str(e))
+
         finally:
-            # CRITICAL: Always delete the file - moved to finally to ensure it always runs
-            try:
-                success = await self._force_delete_file(audio_file)
-                if success:
-                    logger.debug(
-                        "🗑️ Successfully deleted audio file: %s", audio_file)
-                else:
-                    logger.warning(
-                        "⚠️ Failed to delete audio file: %s", audio_file)
-            except Exception as cleanup_error:
-                logger.error("Error during file cleanup for %s: %s",
-                             audio_file, str(cleanup_error))
+            logger.debug(
+                "🏁 Transcription function completing for user %s", user)
+            # Clean up the audio file
+            if audio_file and os.path.exists(audio_file):
+                await self._force_delete_file(audio_file)
+            logger.debug(
+                "🔚 transcribe_audio finally block completed for user %s", user)
 
     async def _force_delete_file(self, file_path):
         """Forcefully delete a file with multiple retries and GC."""
@@ -857,136 +671,58 @@ class RealTimeWaveSink(WaveSink):
             return True
 
         # Try to delete the file with multiple retries
-        for attempt in range(5):  # Increased from 3 to 5 attempts
+        for attempt in range(5):
             try:
-                # Force garbage collection to release file handles
-                gc.collect()
-                await asyncio.sleep(0.1)  # Small delay to let GC work
-
-                # Try to delete
-                os.remove(file_path)
+                os.unlink(file_path)
                 logger.debug("Deleted file: %s (attempt %d)",
                              os.path.basename(file_path), attempt + 1)
-
-                # Verify deletion
-                if not os.path.exists(file_path):
-                    return True
-
-                logger.warning(
-                    "File still exists after deletion attempt %d: %s", attempt + 1, file_path)
-            except (PermissionError, OSError) as e:
-                logger.warning(
-                    "Deletion attempt %d failed: %s", attempt + 1, e)
-                # Exponential backoff
-                await asyncio.sleep(0.5 * (2 ** attempt))
+                return True
+            except (OSError, PermissionError) as e:
+                if attempt < 4:
+                    await asyncio.sleep(0.1)
+                    continue
+                logger.debug("Delete failed attempt %d: %s",
+                             attempt + 1, str(e))
 
         # Last resort: try with Windows-specific commands on Windows
         if os.name == 'nt':
             try:
-                # Try multiple Windows deletion commands
-                commands = [
-                    f'del /F /Q "{file_path}"',
-                    f'erase /F "{file_path}"',
-                    f'powershell Remove-Item -Force "{file_path}"'
-                ]
-
-                for cmd in commands:
-                    result = subprocess.run(
-                        cmd, shell=True, capture_output=True, text=True)
-                    if result.returncode == 0:
-                        logger.debug(
-                            "Successfully deleted with command: %s", cmd.split()[0])
-                        if not os.path.exists(file_path):
-                            return True
-
-            except (OSError, subprocess.CalledProcessError) as e:
-                logger.error("Windows command deletion failed: %s", e)
+                import subprocess
+                subprocess.run(['del', '/f', file_path],
+                               shell=True, check=False, capture_output=True)
+                return True
+            except:
+                pass
 
         # Final attempt: rename the file to mark for deletion
         try:
-            import uuid
-            temp_name = f"{file_path}.{uuid.uuid4().hex}.tmp"
+            temp_name = file_path + '.delete_me'
             os.rename(file_path, temp_name)
-            logger.warning("Renamed undeletable file for cleanup: %s -> %s",
-                           os.path.basename(file_path), os.path.basename(temp_name))
+            logger.debug("Renamed file for deletion: %s", temp_name)
             return True
         except (OSError, PermissionError) as e:
-            logger.error("Failed to rename file for cleanup: %s", e)
+            logger.debug("Rename failed: %s", str(e))
 
         logger.error(
             "CRITICAL: Failed to delete file after all attempts: %s", file_path)
         return False
 
-    def _cleanup_audio_file(self, audio_file):
-        """
-        Legacy synchronous file cleanup method - 
-        For backward compatibility only.
-        Use _force_delete_file instead.
-        """
-        # Run the async delete in a non-blocking way
-        if audio_file and os.path.exists(audio_file):
-            # Create a task to delete the file
-            asyncio.create_task(self._force_delete_file(audio_file))
-
-    async def _update_gui(self, user, transcribed_text, translated_text):
+    async def _update_gui(self, user, text, translated_text, message_type):
         """Update the GUI with transcription and translation results."""
-        logger.debug("_update_gui called for user %s", user)
+        logger.debug(
+            "_update_gui called for user %s with message_type: %s", user, message_type)
 
         try:
-            # Try to update the GUI through parent object
-            if hasattr(self, 'parent') and self.parent:
-                # Check if the parent has a update_text_display method
-                if hasattr(self.parent, 'update_text_display'):
-                    logger.debug(
-                        "Calling parent.update_text_display for user %s", user)
-                    self.parent.update_text_display(
-                        transcribed_text, translated_text)
-                    return
-
-            # If we get here, try the translation callback
-            if self.translation_callback is not None:
-                try:
-                    logger.debug(
-                        "Calling translation_callback for user %s", user)
-                    # Send transcription first
-                    await self.translation_callback(user, transcribed_text, message_type="transcription")
-                    logger.debug(
-                        "Transcription callback completed for user %s", user)
-
-                    # Then send translation if different
-                    if transcribed_text != translated_text:
-                        await self.translation_callback(user, translated_text, message_type="translation")
-                        logger.debug(
-                            "Translation callback completed for user %s", user)
-                    else:
-                        await self.translation_callback(user, translated_text, message_type="translation")
-                        logger.debug(
-                            "Translation callback completed (same as transcriptions) for user %s", user)
-
-                    return
-                except TypeError as e:
-                    # Try without message_type parameter as a fallback
-                    logger.debug(
-                        "Error with message_type parameter for user %s: %s, trying without it", user, e)
-                    if self.translation_callback is not None:
-                        await self.translation_callback(user, transcribed_text)
-                        logger.debug(
-                            "Fallback transcription callback completed for user %s", user)
-                    if (transcribed_text != translated_text and self.translation_callback is not None):
-                        await self.translation_callback(user, translated_text)
-                        logger.debug(
-                            "Fallback translation callback completed for user %s", user)
-                    return
+            if self.translation_callback:
+                logger.debug(
+                    "Calling translation_callback for user %s with type %s", user, message_type)
+                await self.translation_callback(user, text, message_type)
             else:
                 logger.warning(
-                    "No translation_callback available for user %s", user)
+                    "No translation callback available for user %s", user)
 
         except Exception as e:
-            logger.error(
-                "Error updating display for user %s: %s", user, str(e))
-            import traceback
-            logger.debug("GUI update error traceback: %s",
-                         traceback.format_exc())
+            logger.error("Error in _update_gui for user %s: %s", user, str(e))
 
     def _check_inactive_speakers(self):
         """Periodically check for users who have stopped speaking but haven't been processed."""
@@ -995,35 +731,42 @@ class RealTimeWaveSink(WaveSink):
 
             # CRITICAL FIX: Add queue monitoring
             queue_size = self.workers.queue.qsize()
-            if queue_size > 30:  # Warn if queue is getting full
-                logger.warning(
-                    "⚠️ Transcription queue getting full: %d/50 items", queue_size)
+            if queue_size > 30:
+                logger.warning("⚠️ High queue load: %d items", queue_size)
             elif queue_size > 0:
-                logger.debug("📊 Queue status: %d/50 items", queue_size)
+                logger.debug("Queue activity: %d items processing", queue_size)
 
             # Check each user
             for user, user_state in list(self.users.items()):
-                if (user_state.is_speaking and user_state.speech_detected):
-                    # Check time since last packet
-                    time_since_last = current_time - user_state.last_packet_time
-
-                    # Process if inactive for too long
-                    if time_since_last > self.config.force_process_timeout:
+                try:
+                    # Check for users who have been inactive for too long
+                    if (user_state.is_speaking and
+                        user_state.speech_detected and
+                            current_time - user_state.last_active_time > 3.0):
                         logger.debug(
                             "Timer detected inactive speaker %s. Processing speech.", user)
-                        user_state.is_speaking = False
                         self.process_speech_buffer(user)
+                        user_state.is_speaking = False
                         user_state.speech_detected = False
+                        user_state.silence_frames = 0
                         user_state.speech_buffer = io.BytesIO()
+                except Exception as user_error:
+                    logger.error(
+                        "Error processing inactive user %s: %s", user, str(user_error))
+
         except (KeyError, AttributeError, TypeError, ValueError) as e:
             logger.error("Error checking inactive speakers: %s", e)
         finally:
             # Reschedule the timer if still running
             if self.workers.running:
-                self.workers.timer = threading.Timer(
-                    1.0, self._check_inactive_speakers)  # Increased from 0.5 to 1.0 to reduce overhead
-                self.workers.timer.daemon = True
-                self.workers.timer.start()
+                try:
+                    self.workers.timer = threading.Timer(
+                        1.0, self._check_inactive_speakers)
+                    self.workers.timer.daemon = True
+                    self.workers.timer.start()
+                except Exception as timer_error:
+                    logger.error("Failed to restart timer: %s",
+                                 str(timer_error))
 
     def cleanup(self):
         """Clean up resources when the sink is no longer needed."""
@@ -1035,8 +778,10 @@ class RealTimeWaveSink(WaveSink):
 
         # Cancel timer if it exists
         if self.workers.timer:
-            logger.debug("Canceling worker timer")
-            self.workers.timer.cancel()
+            try:
+                self.workers.timer.cancel()
+            except:
+                pass
 
         # Add a small delay to let threads terminate naturally
         logger.debug("Waiting for threads to terminate naturally")
@@ -1044,31 +789,23 @@ class RealTimeWaveSink(WaveSink):
 
         # Clear the queue to unblock any waiting threads
         try:
-            logger.debug("Clearing queue (current size: %d)",
-                         self.workers.queue.qsize())
             while not self.workers.queue.empty():
                 try:
-                    item = self.workers.queue.get_nowait()
-                    logger.debug("Removed item from queue: %s", item[0])
+                    self.workers.queue.get_nowait()
                     self.workers.queue.task_done()
-                except queue.Empty:
-                    logger.debug("Queue empty exception while clearing")
+                except:
                     break
         except (ValueError, RuntimeError) as e:
-            logger.error("Error clearing queue: %s", e)
+            logger.debug("Queue clear error: %s", str(e))
 
         # Wait for all worker threads to finish with timeout
         logger.debug("Waiting for worker threads to join...")
         for i, worker in enumerate(self.workers.workers):
             try:
-                worker.join(timeout=2.0)  # Wait up to 2 seconds per thread
-                if worker.is_alive():
-                    logger.warning(
-                        "Worker thread %d still alive after join timeout", i+1)
-                else:
-                    logger.debug("Worker thread %d successfully joined", i+1)
-            except RuntimeError as e:
-                logger.error("Error joining worker thread %d: %s", i+1, e)
+                worker.join(timeout=2.0)
+                logger.debug("Worker thread %d successfully joined", i + 1)
+            except:
+                logger.warning("Worker thread %d failed to join", i + 1)
 
         logger.info("Cleaning up sink resources - %d workers processed",
                     self.workers.num_workers)

@@ -152,12 +152,37 @@ def _is_recoverable_error(error_str):
         "Error writing trailer",
         "Error closing file",
         "RuntimeError: NYI",  # TorchScript VAD errors
-        "Error submitting a packet to the muxer"  # FFmpeg packet errors
+        "Error submitting a packet to the muxer",  # FFmpeg packet errors
+        "vad_annotator.py"  # Any VAD-related errors
     ]
 
     return (any(error in error_str for error in recoverable_errors) or
             "tensor" in error_str.lower() or
-            "NYI" in error_str)  # Catch "Not Yet Implemented" errors
+            "NYI" in error_str or
+            "TorchScript" in error_str)  # Catch TorchScript errors
+
+
+def _reset_model_state(model):
+    """Reset model internal state to recover from corrupted state."""
+    try:
+        # Clear any cached states that might be corrupted
+        if hasattr(model, 'model') and hasattr(model.model, 'decoder'):
+            # Reset decoder state if available
+            if hasattr(model.model.decoder, 'reset_state'):
+                model.model.decoder.reset_state()
+
+        # Force garbage collection to clear any corrupted tensors
+        import gc
+        import torch
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        logger.debug("Model state reset completed")
+        return True
+    except Exception as e:
+        logger.warning("Could not reset model state: %s", str(e))
+        return False
 
 
 async def transcribe_with_model(audio_file_path, model, model_name):
@@ -188,62 +213,100 @@ async def transcribe_with_model(audio_file_path, model, model_name):
         # CRITICAL: Use model lock to prevent concurrent access to the same model
         def safe_transcribe():
             with model_lock:  # Serialize access to each model
-                try:
-                    return model.transcribe(
-                        audio_file_path,
-                        vad=True,                  # Enable Voice Activity Detection
-                        vad_threshold=0.35,        # VAD confidence threshold
-                        no_speech_threshold=0.6,   # Filter non-speech sections
-                        max_instant_words=0.3,     # Reduce hallucination words
-                        suppress_silence=True,     # Use silence detection for better timestamps
-                        only_voice_freq=True,      # Focus on human voice frequency range
-                        word_timestamps=True       # Important for proper segmentation
-                    )
-                except RuntimeError as e:
-                    error_str = str(e)
-                    if _is_recoverable_error(error_str):
-                        logger.warning(
-                            "PyTorch/FFmpeg/VAD error in %s model (retrying): %s", model_name, error_str)
-                        # Wait a bit and retry once with more conservative settings
-                        import time
-                        time.sleep(0.2)  # Slightly longer wait for VAD errors
-                        return model.transcribe(
-                            audio_file_path,
-                            vad=False,  # Disable VAD on retry to avoid VAD-specific errors
-                            no_speech_threshold=0.6,
-                            max_instant_words=0.3,
-                            suppress_silence=True,
-                            only_voice_freq=True,
-                            word_timestamps=True
-                        )
-                    raise  # Re-raise other RuntimeErrors
+                retry_count = 0
+                max_retries = 2
+
+                while retry_count <= max_retries:
+                    try:
+                        # First attempt: normal transcription with VAD
+                        if retry_count == 0:
+                            return model.transcribe(
+                                audio_file_path,
+                                vad=True,
+                                vad_threshold=0.35,
+                                no_speech_threshold=0.6,
+                                max_instant_words=0.3,
+                                suppress_silence=True,
+                                only_voice_freq=True,
+                                word_timestamps=True
+                            )
+                        # Second attempt: without VAD
+                        elif retry_count == 1:
+                            logger.warning(
+                                "Retrying %s model without VAD", model_name)
+                            return model.transcribe(
+                                audio_file_path,
+                                vad=False,  # Disable VAD
+                                no_speech_threshold=0.6,
+                                max_instant_words=0.3,
+                                suppress_silence=True,
+                                only_voice_freq=True,
+                                word_timestamps=False  # Also disable word timestamps
+                            )
+                        # Third attempt: minimal settings
+                        else:
+                            logger.warning(
+                                "Final retry for %s model with minimal settings", model_name)
+                            return model.transcribe(
+                                audio_file_path,
+                                vad=False,
+                                no_speech_threshold=0.8,  # Higher threshold
+                                suppress_silence=False,   # Disable silence suppression
+                                only_voice_freq=False,    # Disable frequency filtering
+                                word_timestamps=False     # No word timestamps
+                            )
+
+                    except RuntimeError as e:
+                        error_str = str(e)
+                        retry_count += 1
+
+                        if _is_recoverable_error(error_str):
+                            logger.warning(
+                                "PyTorch/FFmpeg/VAD error in %s model (attempt %d/%d): %s",
+                                model_name, retry_count, max_retries + 1, error_str)
+
+                            # Reset model state before retry
+                            _reset_model_state(model)
+
+                            # Wait progressively longer between retries
+                            import time
+                            time.sleep(0.1 * retry_count)
+
+                            if retry_count > max_retries:
+                                logger.error(
+                                    "Max retries exceeded for %s model, skipping audio", model_name)
+                                return None  # Return None to indicate failure
+                            continue
+                        else:
+                            # Non-recoverable error, re-raise
+                            raise
+
+                return None  # Should not reach here
 
         # Run the blocking transcription in a thread pool to make it truly async
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, safe_transcribe)
 
+        # Handle failure case
+        if result is None:
+            logger.warning(
+                "Transcription failed for %s model after all retries", model_name)
+            return "", "en", None
+
         # Extract text and detected language
         transcribed_text = result.text if result.text else ""
-        detected_language = result.language if result.language else ""
+        detected_language = result.language if result.language else "en"
 
         logger.debug("✅ [%s] %s model completed transcription",
                      transcription_id, model_name.upper())
         return transcribed_text, detected_language, result
 
-    except RuntimeError as e:
-        error_str = str(e)
-        if _is_recoverable_error(error_str):
-            logger.warning(
-                "PyTorch/FFmpeg error in %s model (skipping): %s", model_name, error_str)
-            # Return empty result for FFmpeg/tensor errors to avoid crashing
-            return "", "en", None
-
-        logger.error("Unexpected RuntimeError in %s model: %s",
-                     model_name, str(e))
-        raise
     except Exception as e:
         logger.error("Unexpected error in %s model: %s", model_name, str(e))
-        raise
+        # Reset model state on any unexpected error
+        _reset_model_state(model)
+        # Return empty result instead of crashing
+        return "", "en", None
     finally:
         # Thread-safe cleanup
         with MODEL_USAGE_STATS["stats_lock"]:

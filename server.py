@@ -89,7 +89,7 @@ async def lifespan(app: FastAPI):
 
         # Start Discord bot
         logger.info("Starting Discord bot...")
-        # CRITICAL FIX: Start bot in background task instead of blocking
+        # Read token here instead of in main
         with open('token.txt', 'r', encoding='utf-8') as f:
             bot_token = f.read().strip()
 
@@ -218,22 +218,9 @@ def read_token():
 
 async def main():
     """Main application entry point."""
-    logger.info("🚀 Starting Discord Voice Translator Server...")
-
-    # Read Discord bot token
-    bot_token = read_token()
-    if not bot_token:
-        logger.error("❌ Cannot start without a valid Discord bot token!")
-        logger.error(
-            "❌ Please create a token.txt file with your Discord bot token")
-        return
+    # REMOVED: Duplicate startup logging and token reading - this is now handled in lifespan()
 
     try:
-        # REMOVED: Duplicate model warmup - this is now handled in lifespan()
-        # Initialize translator - this is also handled in lifespan()
-        # await initialize_translator()
-        # await utils.warm_up_pipeline()
-
         # Configure and start web server
         config = uvicorn.Config(
             app=app,

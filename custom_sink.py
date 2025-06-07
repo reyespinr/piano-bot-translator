@@ -632,7 +632,7 @@ class RealTimeWaveSink(WaveSink):
                 if should_translate_result:
                     # Translate the text
                     logger.debug("🌍 Translating text for user %s", user)
-                    translated_text = await utils.translate(transcribed_text, target_lang='en')
+                    translated_text = await utils.translate(transcribed_text)
                     logger.debug(
                         "🌍 Translation result for user %s: %s", user, translated_text)
 

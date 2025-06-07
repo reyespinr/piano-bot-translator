@@ -11,6 +11,7 @@ import gc
 import sys
 import importlib
 import subprocess
+import struct  # ADD: Missing import for struct errors
 from typing import Callable
 from custom_sink import RealTimeWaveSink
 import utils
@@ -51,10 +52,12 @@ class VoiceTranslator:
         """Verify model loading capabilities without loading the model"""
         try:
             logger.info("Loading translation models...")
-            # We don't actually load the model here - it will be loaded
-            # on-demand when transcribe is first called
-            if hasattr(utils, "_load_model_if_needed"):
+            # Check if we have the transcribe function available
+            if hasattr(utils, "transcribe"):
+                # Trigger the warm-up process which loads both models
+                await utils.warm_up_pipeline()
                 self.model_loaded = True
+                logger.info("✅ Models loaded and warmed up successfully")
                 return True
             logger.warning("Model loading mechanism not found")
             return False
@@ -121,26 +124,51 @@ class VoiceTranslator:
                 except ImportError:
                     logger.debug("Could not import server module")
 
-            # The audio callback must be a normal function that returns a coroutine
-            # And it needs to be resistant to any argument patterns
+            # IMPROVED: Create a robust audio callback that handles Discord.py crashes
             def audio_callback(_sink, *args):
-                # Create a dummy coroutine that does nothing
-                async def dummy_process():
-                    # Only log if we have proper arguments
-                    if len(args) > 0:
-                        try:
-                            user_id = args[0]
-                            audio_data = args[1] if len(args) > 1 else None
-                            audio_length = len(audio_data) if audio_data else 0
-                            logger.debug(
-                                "Audio received from user %s, length: %d",
-                                user_id, audio_length)
-                        except (IndexError, TypeError, AttributeError):
-                            # Just silently handle any exceptions in the logging
-                            pass
+                async def robust_process():
+                    try:
+                        # Only log if we have proper arguments
+                        if len(args) > 0:
+                            try:
+                                user_id = args[0]
+                                audio_data = args[1] if len(args) > 1 else None
+                                audio_length = len(
+                                    audio_data) if audio_data else 0
+                                logger.debug(
+                                    "Audio received from user %s, length: %d",
+                                    user_id, audio_length)
+                            except (IndexError, TypeError, AttributeError):
+                                # Just silently handle any exceptions in the logging
+                                pass
+                    except Exception as e:
+                        # Catch any unexpected errors in audio processing
+                        logger.warning(
+                            "Audio callback error (non-critical): %s", str(e))
                     return
                 # Return the coroutine object
-                return dummy_process()
+                return robust_process()
+
+            # CRITICAL: Monkey patch Discord's voice client to handle decryption errors
+            original_unpack_audio = voice_client.unpack_audio
+
+            def safe_unpack_audio(data):
+                try:
+                    return original_unpack_audio(data)
+                except (IndexError, struct.error, ValueError, TypeError, AttributeError) as e:
+                    # Log the error but don't crash the thread
+                    logger.warning(
+                        "Discord audio packet corruption (ignoring): %s", str(e))
+                    return  # Skip this packet
+                except Exception as e:
+                    # Catch ANY other unexpected Discord.py errors
+                    logger.error(
+                        "Unexpected Discord audio error (ignoring): %s", str(e))
+                    return  # Skip this packet
+
+            # Apply the patch
+            voice_client.unpack_audio = safe_unpack_audio
+            logger.debug("Applied Discord audio corruption protection")
 
             # Start recording with our bullet-proof callback
             voice_client.start_recording(self.sink, audio_callback)
@@ -223,8 +251,15 @@ class VoiceTranslator:
                 return
 
             try:
-                # Get transcription and detected language
-                transcribed_text, detected_language = await utils.transcribe(audio_file)
+                # Get current queue size from sink if available for smart routing
+                current_queue_size = 0
+                if hasattr(self, 'sink') and hasattr(self.sink, 'workers'):
+                    current_queue_size = self.sink.workers.queue.qsize()
+
+                # Get transcription and detected language with smart routing
+                transcribed_text, detected_language = await utils.transcribe(
+                    audio_file, current_queue_size=current_queue_size
+                )
 
                 # Skip processing if transcription was empty
                 if not transcribed_text:

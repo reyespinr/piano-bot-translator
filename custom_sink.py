@@ -191,33 +191,53 @@ class RealTimeWaveSink(WaveSink):
 
     def is_audio_active(self, audio_data, user):
         """Check if audio data contains active speech."""
-        # Convert bytes to numpy array (assuming PCM signed 16-bit little-endian)
-        audio_array = np.frombuffer(audio_data, dtype=np.int16)
+        try:
+            # PROTECTION: Validate audio data before processing
+            if not audio_data or len(audio_data) < 2:
+                return False
 
-        # Calculate energy of the current frame
-        energy = np.mean(np.abs(audio_array))
+            # Convert bytes to numpy array (assuming PCM signed 16-bit little-endian)
+            audio_array = np.frombuffer(audio_data, dtype=np.int16)
 
-        # Get user state
-        user_state = self._get_user_state(user)
+            # PROTECTION: Check for empty array
+            if len(audio_array) == 0:
+                return False
 
-        # Initialize energy history if needed
-        if not user_state.energy_history:
-            user_state.energy_history = [energy] * 5
+            # Calculate energy of the current frame
+            energy = np.mean(np.abs(audio_array))
 
-        # Update energy history
-        user_state.energy_history.append(energy)
-        # Keep last 5 frames
-        user_state.energy_history = user_state.energy_history[-5:]
+            # Get user state
+            user_state = self._get_user_state(user)
 
-        # Calculate average energy over recent frames
-        avg_energy = np.mean(user_state.energy_history)
+            # Initialize energy history if needed
+            if not user_state.energy_history:
+                user_state.energy_history = [energy] * 5
 
-        # Return if audio is considered active speech
-        return avg_energy > 300  # Threshold for speech detection
+            # Update energy history
+            user_state.energy_history.append(energy)
+            # Keep last 5 frames
+            user_state.energy_history = user_state.energy_history[-5:]
+
+            # Calculate average energy over recent frames
+            avg_energy = np.mean(user_state.energy_history)
+
+            # Return if audio is considered active speech
+            return avg_energy > 300  # Threshold for speech detection
+
+        except (ValueError, TypeError, OverflowError, np.core._exceptions._ArrayMemoryError) as e:
+            logger.warning(
+                "Audio activity detection error for user %s: %s", user, str(e))
+            return False  # Default to inactive for corrupted audio
 
     def write(self, data, user):
         """Process incoming audio data from Discord."""
         try:
+            # PROTECTION: Validate incoming audio data before processing
+            if not data or len(data) < 4:  # Minimum valid audio packet size
+                logger.debug("Skipping invalid/corrupted audio packet for user %s (size: %d)",
+                             user, len(data) if data else 0)
+                return
+
             current_time = time.time()
 
             # Check if user is enabled for processing - CRITICAL LOGIC
@@ -239,7 +259,12 @@ class RealTimeWaveSink(WaveSink):
                             logger.debug(
                                 "User %s audio processing disabled", user_id)
                             self.last_block_log_time[user_id] = current_time
-                        super().write(data, user)
+                        # PROTECTION: Still call super().write() even for disabled users to prevent Discord.py issues
+                        try:
+                            super().write(data, user)
+                        except Exception as e:
+                            logger.warning(
+                                "Discord write error for disabled user %s: %s", user_id, str(e))
                         return
 
                 else:
@@ -247,10 +272,15 @@ class RealTimeWaveSink(WaveSink):
                     logger.info(
                         "New user %s detected, requiring manual enable", user_id)
                     self.parent.user_processing_enabled[user_id] = False
-                    super().write(data, user)
+                    # PROTECTION: Still call super().write() to prevent Discord.py issues
+                    try:
+                        super().write(data, user)
+                    except Exception as e:
+                        logger.warning(
+                            "Discord write error for new user %s: %s", user_id, str(e))
                     return
 
-        # Continue with normal audio processing for enabled users
+            # Continue with normal audio processing for enabled users
             # Update last activity time when any audio is processed
             self.session.last_activity_time = current_time
 
@@ -261,8 +291,14 @@ class RealTimeWaveSink(WaveSink):
             if user_state.last_packet_time == 0:
                 user_state.last_packet_time = current_time
 
-            # Check if the current packet contains active speech
-            is_active = self.is_audio_active(data, user)
+            # PROTECTION: Validate audio data for activity detection
+            try:
+                # Check if the current packet contains active speech
+                is_active = self.is_audio_active(data, user)
+            except (ValueError, TypeError, OverflowError) as e:
+                logger.warning(
+                    "Audio activity detection failed for user %s: %s", user, str(e))
+                is_active = False  # Default to inactive for corrupted packets
 
             # Update last active time if speech is detected
             if is_active:
@@ -292,11 +328,20 @@ class RealTimeWaveSink(WaveSink):
                 self._handle_silence(user, data)
             user_state.last_packet_time = current_time
 
-            # Write to the main buffer
-            super().write(data, user)
+            # PROTECTION: Write to the main buffer with error handling
+            try:
+                super().write(data, user)
+            except Exception as e:
+                logger.warning(
+                    "Discord super().write() error for user %s: %s", user, str(e))
+                # Continue processing even if Discord.py write fails
 
         except (KeyError, TypeError, ValueError, AttributeError, IOError, RuntimeError) as e:
             logger.error("Error in write method for user %s: %s", user, str(e))
+        except Exception as e:
+            # Catch any other unexpected errors to prevent thread crashes
+            logger.error(
+                "Unexpected error in write method for user %s: %s", user, str(e))
 
     def _update_pre_speech_buffer(self, user, data):
         """Update the pre-speech buffer for smoother speech beginning."""
@@ -504,10 +549,16 @@ class RealTimeWaveSink(WaveSink):
             user_state.speech_buffer.seek(0)  # Reset buffer pointer
             audio_data = user_state.speech_buffer.read()
 
-            # Final validation - ensure we have actual audio data
+            # ENHANCED VALIDATION: Check for valid audio data
             if len(audio_data) < 1920:  # Less than ~10ms of audio
                 logger.debug(
                     "Audio data too small (%d bytes), skipping.", len(audio_data))
+                return
+
+            # NEW: Validate audio data integrity before creating WAV
+            if not self._validate_audio_data(audio_data):
+                logger.warning(
+                    "Audio data validation failed for user %s, skipping", user)
                 return
 
             with open(temp_audio_file, 'wb') as out_f:
@@ -517,6 +568,14 @@ class RealTimeWaveSink(WaveSink):
                 wf.setframerate(48000)  # 48kHz (Discord's standard)
                 wf.writeframes(audio_data)
                 wf.close()
+
+            # ADDITIONAL: Validate the created WAV file
+            if not self._validate_wav_file(temp_audio_file):
+                logger.warning(
+                    "Generated WAV file is invalid for user %s, skipping", user)
+                if os.path.exists(temp_audio_file):
+                    os.remove(temp_audio_file)
+                return
 
             logger.info("Processing speech for user %s, audio file size: %d bytes",
                         user, os.path.getsize(temp_audio_file))
@@ -534,9 +593,84 @@ class RealTimeWaveSink(WaveSink):
 
         except (IOError, OSError, wave.Error) as e:
             logger.error("Error creating WAV file for user %s: %s", user, e)
+            # Clean up if file was created
+            if os.path.exists(temp_audio_file):
+                try:
+                    os.remove(temp_audio_file)
+                except OSError:
+                    pass
+
+    def _validate_audio_data(self, audio_data):
+        """Validate raw audio data before processing."""
+        try:
+            # Check minimum size
+            if len(audio_data) < 3840:  # ~20ms minimum
+                return False
+
+            # Check if data is not all zeros (complete silence)
+            if all(b == 0 for b in audio_data):
+                logger.debug("Audio data is all zeros (complete silence)")
+                return False
+
+            # Convert to numpy array and check for valid range
+            try:
+                audio_array = np.frombuffer(audio_data, dtype=np.int16)
+
+                # Check for NaN or infinite values
+                if not np.isfinite(audio_array).all():
+                    logger.debug("Audio data contains NaN or infinite values")
+                    return False
+
+                # Check if audio has reasonable amplitude range
+                max_amplitude = np.max(np.abs(audio_array))
+                if max_amplitude < 50:  # Very quiet audio might be corrupted
+                    logger.debug("Audio amplitude too low: %d", max_amplitude)
+                    return False
+
+                return True
+
+            except (ValueError, TypeError) as e:
+                logger.debug("Audio data conversion failed: %s", str(e))
+                return False
+
+        except Exception as e:
+            logger.warning("Audio validation error: %s", str(e))
+            return False
+
+    def _validate_wav_file(self, file_path):
+        """Validate that the created WAV file is readable."""
+        try:
+            with wave.open(file_path, 'rb') as wf:
+                # Check basic properties
+                if wf.getnchannels() != 2:
+                    logger.debug(
+                        "WAV file has wrong channel count: %d", wf.getnchannels())
+                    return False
+
+                if wf.getsampwidth() != 2:
+                    logger.debug(
+                        "WAV file has wrong sample width: %d", wf.getsampwidth())
+                    return False
+
+                if wf.getframerate() != 48000:
+                    logger.debug(
+                        "WAV file has wrong sample rate: %d", wf.getframerate())
+                    return False
+
+                # Try to read a few frames to ensure file is not corrupted
+                frames = wf.readframes(100)
+                if len(frames) < 100:
+                    logger.debug("WAV file too short: %d frames", len(frames))
+                    return False
+
+                return True
+
+        except (wave.Error, IOError, OSError) as e:
+            logger.debug("WAV file validation failed: %s", str(e))
+            return False
 
     async def transcribe_audio(self, audio_file, user):
-        """Transcribe the audio file and update the GUI with results."""
+        """Transcribe the audio file with smart model routing and update the GUI with results."""
         try:
             # Skip if file doesn't exist
             if not os.path.exists(audio_file):
@@ -548,26 +682,27 @@ class RealTimeWaveSink(WaveSink):
             detected_language = None
 
             try:
-                # Get transcription and detected language
-                transcribed_text, detected_language = await utils.transcribe(audio_file)
+                # Get current queue size for smart routing
+                current_queue_size = self.workers.queue.qsize()
+
+                # Get transcription with smart model routing
+                transcribed_text, detected_language = await utils.transcribe(
+                    audio_file, current_queue_size=current_queue_size
+                )
 
                 # Skip processing if transcription was empty (failed confidence check)
                 if not transcribed_text:
                     logger.debug(
                         "Empty transcription for user %s, skipping processing.", user)
-                    # Must delete file right after transcription
-                    await self._force_delete_file(audio_file)
-                    return
+                    return  # Will be cleaned up in finally block
+
             except (OSError, IOError, ValueError, TypeError, AttributeError, RuntimeError) as e:
                 logger.error("Error during transcription: %s", e)
-                # Must delete file even if transcription fails
-                await self._force_delete_file(audio_file)
-                return
+                return  # Will be cleaned up in finally block
 
             try:
                 # Determine if translation is needed
-                needs_translation = await utils.should_translate(transcribed_text,
-                                                                 detected_language)
+                needs_translation = await utils.should_translate(transcribed_text, detected_language)
 
                 if needs_translation:
                     translated_text = await utils.translate(transcribed_text)
@@ -590,63 +725,86 @@ class RealTimeWaveSink(WaveSink):
                     logger.error("GUI update failed: %s", e)
                     # Even if GUI update fails, try the translation callback directly
                     if self.translation_callback is not None:
-                        await self.translation_callback(user,
-                                                        transcribed_text,
-                                                        message_type="transcription")
-                    if (needs_translation
-                        and translated_text != transcribed_text
-                            and self.translation_callback is not None):
-                        # pylint: disable-next=not-callable
-                        await self.translation_callback(user,
-                                                        translated_text,
-                                                        message_type="translation")
-            finally:
-                # CRITICAL: Must delete the file after we're done with it
-                # This needs to be in the finally block to ensure it runs
-                await self._force_delete_file(audio_file)
+                        await self.translation_callback(user, transcribed_text, message_type="transcription")
+                    if (needs_translation and translated_text != transcribed_text and self.translation_callback is not None):
+                        await self.translation_callback(user, translated_text, message_type="translation")
 
-        except (OSError, IOError, ValueError, TypeError, AttributeError, RuntimeError) as e:
+            except (OSError, IOError, ValueError, TypeError, AttributeError, RuntimeError) as e:
+                logger.error("Error during translation processing: %s", e)
+
+        except Exception as e:
             logger.error(
-                "Error during transcription/translation for user %s: %s", user, e)
-            # One final attempt to delete the file
-            await self._force_delete_file(audio_file)
+                "Unexpected error during transcription/translation for user %s: %s", user, e)
+        finally:
+            # CRITICAL: Always delete the file - moved to finally to ensure it always runs
+            success = await self._force_delete_file(audio_file)
+            if not success:
+                logger.warning("Failed to delete audio file: %s", audio_file)
 
     async def _force_delete_file(self, file_path):
         """Forcefully delete a file with multiple retries and GC."""
         if not file_path or not os.path.exists(file_path):
-            return
+            return True
 
         # Try to delete the file with multiple retries
-        for attempt in range(3):
+        for attempt in range(5):  # Increased from 3 to 5 attempts
             try:
-                # Try to force Python to release any file handles
-                gc.collect()                # Try to delete
+                # Force garbage collection to release file handles
+                gc.collect()
+                await asyncio.sleep(0.1)  # Small delay to let GC work
+
+                # Try to delete
                 os.remove(file_path)
-                logger.debug("Deleted file: %s", os.path.basename(file_path))
+                logger.debug("Deleted file: %s (attempt %d)",
+                             os.path.basename(file_path), attempt + 1)
 
                 # Verify deletion
                 if not os.path.exists(file_path):
                     return True
 
                 logger.warning(
-                    "File still exists after deletion attempt: %s", file_path)
+                    "File still exists after deletion attempt %d: %s", attempt + 1, file_path)
             except (PermissionError, OSError) as e:
-                logger.warning("Deletion attempt %d failed: %s", attempt+1, e)
-                # Wait before retry
-                await asyncio.sleep(0.5)
+                logger.warning(
+                    "Deletion attempt %d failed: %s", attempt + 1, e)
+                # Exponential backoff
+                await asyncio.sleep(0.5 * (2 ** attempt))
 
         # Last resort: try with Windows-specific commands on Windows
         if os.name == 'nt':
             try:
-                subprocess.run(f'del /F "{file_path}"',
-                               shell=True, check=False)
-                logger.debug(
-                    "Attempted deletion with Windows command: %s", file_path)
+                # Try multiple Windows deletion commands
+                commands = [
+                    f'del /F /Q "{file_path}"',
+                    f'erase /F "{file_path}"',
+                    f'powershell Remove-Item -Force "{file_path}"'
+                ]
+
+                for cmd in commands:
+                    result = subprocess.run(
+                        cmd, shell=True, capture_output=True, text=True)
+                    if result.returncode == 0:
+                        logger.debug(
+                            "Successfully deleted with command: %s", cmd.split()[0])
+                        if not os.path.exists(file_path):
+                            return True
+
             except (OSError, subprocess.CalledProcessError) as e:
                 logger.error("Windows command deletion failed: %s", e)
 
-        logger.warning(
-            "Failed to delete file after multiple attempts: %s", file_path)
+        # Final attempt: rename the file to mark for deletion
+        try:
+            import uuid
+            temp_name = f"{file_path}.{uuid.uuid4().hex}.tmp"
+            os.rename(file_path, temp_name)
+            logger.warning("Renamed undeletable file for cleanup: %s -> %s",
+                           os.path.basename(file_path), os.path.basename(temp_name))
+            return True
+        except (OSError, PermissionError) as e:
+            logger.error("Failed to rename file for cleanup: %s", e)
+
+        logger.error(
+            "CRITICAL: Failed to delete file after all attempts: %s", file_path)
         return False
 
     def _cleanup_audio_file(self, audio_file):

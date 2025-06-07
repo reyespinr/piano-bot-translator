@@ -160,6 +160,7 @@ class VoiceTranslator:
                     logger.warning(
                         "Discord audio packet corruption (ignoring): %s", str(e))
                     return  # Skip this packet
+                # pylint: disable-next=broad-except
                 except Exception as e:
                     # Catch ANY other unexpected Discord.py errors
                     logger.error(

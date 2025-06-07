@@ -49,6 +49,14 @@ class PianoBotClient {
                 console.error(`Required element not found: ${elementName}`);
             }
         }
+        
+        // Clear both containers on page load to ensure clean state
+        if (this.elements.transcriptionBox) {
+            this.elements.transcriptionBox.innerHTML = '';
+        }
+        if (this.elements.translationsContainer) {
+            this.elements.translationsContainer.innerHTML = '';
+        }
     }
 
     attachEventListeners() {
@@ -107,6 +115,9 @@ class PianoBotClient {
             this.isConnected = true;
             this.reconnectAttempts = 0;
             this.updateConnectionStatus('Connected', 'online');
+            
+            // Clear both message containers and reset speaker tracking on new connection
+            this.clearMessages();
             
             // Process queued messages
             this.processMessageQueue();

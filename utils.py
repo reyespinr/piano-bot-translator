@@ -20,9 +20,9 @@ import wave
 import string
 import numpy as np
 import requests
-import stable_whisper
 import asyncio
 import threading
+import stable_whisper
 from logging_config import get_logger
 
 # Initialize logger for this module
@@ -42,6 +42,7 @@ COMMON_HALLUCINATIONS = {
 MODEL_ACCURATE = None  # large-v3-turbo for quality
 MODEL_FAST = None      # base for speed
 MODEL_ACCURATE_NAME = "large-v3-turbo"
+# MODEL_FAST_NAME = "large-v3-turbo"
 MODEL_FAST_NAME = "base"
 
 # Model usage tracking with thread-safe locks
@@ -141,6 +142,24 @@ def _should_use_fast_model(audio_file_path, current_queue_size=0, concurrent_req
     return False
 
 
+def _is_recoverable_error(error_str):
+    """Check if the error is a recoverable PyTorch/FFmpeg error."""
+    recoverable_errors = [
+        "Expected key.size",
+        "Invalid argument",
+        "Error muxing",
+        "Error submitting",
+        "Error writing trailer",
+        "Error closing file",
+        "RuntimeError: NYI",  # TorchScript VAD errors
+        "Error submitting a packet to the muxer"  # FFmpeg packet errors
+    ]
+
+    return (any(error in error_str for error in recoverable_errors) or
+            "tensor" in error_str.lower() or
+            "NYI" in error_str)  # Catch "Not Yet Implemented" errors
+
+
 async def transcribe_with_model(audio_file_path, model, model_name):
     """Transcribe using a specific model with consistent parameters - TRUE ASYNC VERSION"""
 
@@ -182,28 +201,22 @@ async def transcribe_with_model(audio_file_path, model, model_name):
                     )
                 except RuntimeError as e:
                     error_str = str(e)
-                    if ("Expected key.size" in error_str or
-                        "tensor" in error_str.lower() or
-                        "Invalid argument" in error_str or
-                        "Error muxing" in error_str or
-                            "Error submitting" in error_str):
+                    if _is_recoverable_error(error_str):
                         logger.warning(
-                            "PyTorch/FFmpeg error in %s model (retrying): %s", model_name, error_str)
-                        # Wait a bit and retry once
+                            "PyTorch/FFmpeg/VAD error in %s model (retrying): %s", model_name, error_str)
+                        # Wait a bit and retry once with more conservative settings
                         import time
-                        time.sleep(0.1)
+                        time.sleep(0.2)  # Slightly longer wait for VAD errors
                         return model.transcribe(
                             audio_file_path,
-                            vad=True,
-                            vad_threshold=0.35,
+                            vad=False,  # Disable VAD on retry to avoid VAD-specific errors
                             no_speech_threshold=0.6,
                             max_instant_words=0.3,
                             suppress_silence=True,
                             only_voice_freq=True,
                             word_timestamps=True
                         )
-                    else:
-                        raise  # Re-raise other RuntimeErrors
+                    raise  # Re-raise other RuntimeErrors
 
         # Run the blocking transcription in a thread pool to make it truly async
         loop = asyncio.get_event_loop()
@@ -219,21 +232,15 @@ async def transcribe_with_model(audio_file_path, model, model_name):
 
     except RuntimeError as e:
         error_str = str(e)
-        if ("Expected key.size" in error_str or
-            "tensor" in error_str.lower() or
-            "Invalid argument" in error_str or
-            "Error muxing" in error_str or
-            "Error submitting" in error_str or
-            "Error writing trailer" in error_str or
-                "Error closing file" in error_str):
+        if _is_recoverable_error(error_str):
             logger.warning(
                 "PyTorch/FFmpeg error in %s model (skipping): %s", model_name, error_str)
             # Return empty result for FFmpeg/tensor errors to avoid crashing
             return "", "en", None
-        else:
-            logger.error("Unexpected RuntimeError in %s model: %s",
-                         model_name, str(e))
-            raise
+
+        logger.error("Unexpected RuntimeError in %s model: %s",
+                     model_name, str(e))
+        raise
     except Exception as e:
         logger.error("Unexpected error in %s model: %s", model_name, str(e))
         raise
@@ -316,12 +323,24 @@ async def transcribe(audio_file_path, current_queue_size=0):
                             language="de"  # Force German language
                         )
                     except RuntimeError as e:
-                        if "Expected key.size" in str(e):
+                        error_str = str(e)
+                        if _is_recoverable_error(error_str):
                             logger.warning(
-                                "PyTorch tensor error during re-transcription (skipping): %s", str(e))
-                            return None
-                        else:
-                            raise
+                                "PyTorch/FFmpeg/VAD error during re-transcription (retrying without VAD): %s", error_str)
+                            # Retry without VAD for problematic audio
+                            import time
+                            time.sleep(0.2)
+                            return model_accurate.transcribe(
+                                audio_file_path,
+                                vad=False,  # Disable VAD on retry
+                                no_speech_threshold=0.6,
+                                max_instant_words=0.3,
+                                suppress_silence=True,
+                                only_voice_freq=True,
+                                word_timestamps=True,
+                                language="de"
+                            )
+                        return None
 
             try:
                 loop = asyncio.get_event_loop()

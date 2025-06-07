@@ -401,17 +401,21 @@ class RealTimeWaveSink(WaveSink):
                     "Failed to write silence data for user %s: %s", user, str(e))
 
         # Increment silence counter
-        # Check if silence has persisted long enough to consider speech ended
         user_state.silence_frames += 1
+
+        # CRITICAL FIX: Only process speech once when threshold is first exceeded
         if (user_state.is_speaking and
-                user_state.silence_frames > self.config.silence_threshold):
+            user_state.silence_frames == self.config.silence_threshold + 1 and  # Only trigger once
+                user_state.speech_detected):  # Only if speech was actually detected
+
             logger.debug("Speech ended for user %s. Processing audio.", user)
-            # Only process if speech was detected in this session
-            if user_state.speech_detected:
-                self.process_speech_buffer(user)
-                user_state.speech_detected = False
-                user_state.silence_frames = 0
-                user_state.speech_buffer = io.BytesIO()
+            self.process_speech_buffer(user)
+
+            # CRITICAL FIX: Reset state immediately to prevent re-processing
+            user_state.is_speaking = False
+            user_state.speech_detected = False
+            user_state.silence_frames = 0
+            user_state.speech_buffer = io.BytesIO()
 
     def process_speech_buffer(self, user):
         """Process the speech buffer for a user and queue for transcription."""
@@ -729,27 +733,44 @@ class RealTimeWaveSink(WaveSink):
         try:
             current_time = time.time()
 
-            # CRITICAL FIX: Add queue monitoring
+            # CRITICAL FIX: Reduce queue monitoring frequency to prevent log spam
             queue_size = self.workers.queue.qsize()
-            if queue_size > 30:
-                logger.warning("⚠️ High queue load: %d items", queue_size)
-            elif queue_size > 0:
-                logger.debug("Queue activity: %d items processing", queue_size)
 
-            # Check each user
+            # Only log queue status every 10 seconds to reduce spam
+            if not hasattr(self, '_last_queue_log_time'):
+                self._last_queue_log_time = 0
+
+            if current_time - self._last_queue_log_time > 10.0:  # Every 10 seconds
+                if queue_size > 30:
+                    logger.warning("⚠️ High queue load: %d items", queue_size)
+                elif queue_size > 0:
+                    logger.debug(
+                        "Queue activity: %d items processing", queue_size)
+                self._last_queue_log_time = current_time
+
+            # Check each user with rate limiting
             for user, user_state in list(self.users.items()):
                 try:
-                    # Check for users who have been inactive for too long
+                    # CRITICAL FIX: Only process inactive speakers once per user
                     if (user_state.is_speaking and
                         user_state.speech_detected and
                             current_time - user_state.last_active_time > 3.0):
-                        logger.debug(
-                            "Timer detected inactive speaker %s. Processing speech.", user)
-                        self.process_speech_buffer(user)
-                        user_state.is_speaking = False
-                        user_state.speech_detected = False
-                        user_state.silence_frames = 0
-                        user_state.speech_buffer = io.BytesIO()
+
+                        # Add rate limiting per user to prevent repeated processing
+                        if not hasattr(user_state, 'last_inactive_check'):
+                            user_state.last_inactive_check = 0
+
+                        # Only process if we haven't checked this user recently
+                        if current_time - user_state.last_inactive_check > 2.0:
+                            logger.debug(
+                                "Timer detected inactive speaker %s. Processing speech.", user)
+                            self.process_speech_buffer(user)
+                            user_state.is_speaking = False
+                            user_state.speech_detected = False
+                            user_state.silence_frames = 0
+                            user_state.speech_buffer = io.BytesIO()
+                            user_state.last_inactive_check = current_time
+
                 except Exception as user_error:
                     logger.error(
                         "Error processing inactive user %s: %s", user, str(user_error))

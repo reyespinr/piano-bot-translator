@@ -42,9 +42,30 @@ class WebSocketManager:
         logger.info("🔌 New WebSocket connection (total: %d)",
                     len(self.active_connections))
 
-        # Send initial data
-        await self.send_guilds(websocket)
+        # Send initial state to new client
         await self.send_bot_status(websocket)
+
+        # If bot is connected to a channel, send current status
+        if (self.bot_manager.bot and self.bot_manager.bot.voice_clients and
+                len(self.bot_manager.bot.voice_clients) > 0):
+
+            voice_client = self.bot_manager.bot.voice_clients[0]
+            if voice_client.channel:
+                connected_users = self.bot_manager.get_connected_users()
+
+                # Send current connection status
+                status_message = {
+                    "type": "status",
+                    "bot_ready": self.bot_manager.is_ready(),
+                    "connected_channel": voice_client.channel.name,
+                    "translations": [],
+                    "is_listening": getattr(self.bot_manager.voice_translator, 'is_listening', False),
+                    "users": connected_users,
+                    "enabled_states": self.bot_manager.user_processing_enabled.copy()
+                }
+
+                await websocket.send_text(json.dumps(status_message))
+                logger.debug("📡 Sent current connection status to new client")
 
     async def disconnect(self, websocket: WebSocket):
         """Remove a WebSocket connection."""
@@ -148,17 +169,25 @@ class WebSocketManager:
             await self.send_response(websocket, "join_channel", success, msg)
 
             if success:
-                # Get connected users and send status update
+                # Get connected users and send comprehensive status update
                 connected_users = self.bot_manager.get_connected_users()
 
-                # Broadcast connection status to all clients with user data
+                # Sync user processing states
+                self.user_processing_enabled = self.bot_manager.user_processing_enabled.copy()
+
+                # Send comprehensive status update to all clients
                 status_message = {
                     "type": "status",
+                    "bot_ready": self.bot_manager.is_ready(),
                     "connected_channel": msg.replace("Connected to ", ""),
+                    "translations": [],  # Empty for new connection
+                    "is_listening": False,
                     "users": connected_users,
-                    "enabled_states": self.bot_manager.user_processing_enabled,
-                    "is_listening": False
+                    "enabled_states": self.user_processing_enabled
                 }
+
+                logger.info("📡 Broadcasting status update: %d users, %d enabled states",
+                            len(connected_users), len(self.user_processing_enabled))
                 await self.broadcast_message(status_message)
 
         except Exception as e:
@@ -203,26 +232,38 @@ class WebSocketManager:
             enabled = bool(message.get("enabled", True))
 
             if user_id:
+                # Update all user processing state locations
                 self.user_processing_enabled[user_id] = enabled
+                self.bot_manager.user_processing_enabled[user_id] = enabled
+
                 logger.info("🔄 User %s processing %s", user_id,
                             "enabled" if enabled else "disabled")
 
-                # Update the translator's user settings
+                # Update the translator's user settings if available
                 if (hasattr(self.bot_manager, 'voice_translator') and
-                    self.bot_manager.voice_translator and
-                    hasattr(self.bot_manager.voice_translator, 'sink') and
-                        self.bot_manager.voice_translator.sink):
+                        self.bot_manager.voice_translator):
 
-                    sink = self.bot_manager.voice_translator.sink
-                    if not hasattr(sink, 'parent') or not sink.parent:
-                        sink.parent = type('obj', (object,), {})
-                    sink.parent.user_processing_enabled = self.user_processing_enabled.copy()
+                    # Update translator's user settings
+                    self.bot_manager.voice_translator.user_processing_enabled[user_id] = enabled
+
+                    # Update sink if available
+                    if (hasattr(self.bot_manager.voice_translator, 'sink') and
+                            self.bot_manager.voice_translator.sink):
+
+                        sink = self.bot_manager.voice_translator.sink
+                        if not hasattr(sink, 'parent') or not sink.parent:
+                            sink.parent = type('obj', (object,), {})()
+                        sink.parent.user_processing_enabled = self.user_processing_enabled.copy()
 
                 # Broadcast the change to all clients
                 await self.broadcast_user_toggle(user_id, enabled)
 
+                # Send response to requesting client
+                await self.send_response(websocket, "toggle_user", True, "User toggle updated")
+
         except Exception as e:
             logger.error("Error toggling user: %s", str(e))
+            await self.send_response(websocket, "toggle_user", False, f"Error: {str(e)}")
 
     async def send_response(self, websocket: WebSocket, command: str, success: bool, message: str):
         """Send a command response."""
@@ -240,8 +281,13 @@ class WebSocketManager:
     async def broadcast_translation(self, user_id: str, text: str, message_type: str = "transcription"):
         """Broadcast transcription/translation to all connected clients."""
         try:
-            # Get user display name
-            user_name = await self.bot_manager.get_user_display_name(user_id)
+            # Get user display name from bot manager with error handling
+            try:
+                user_name = await self.bot_manager.get_user_display_name(user_id)
+            except Exception as name_error:
+                logger.debug("Could not get user name for %s: %s",
+                             user_id, str(name_error))
+                user_name = f"User {user_id}"
 
             message = {
                 "type": message_type,
@@ -253,11 +299,27 @@ class WebSocketManager:
             }
 
             await self.broadcast_message(message)
-            logger.debug("Broadcasted %s for user %s: %s",
-                         message_type, user_name, text)
+            logger.debug("Broadcasted %s for user %s (%s): %s",
+                         message_type, user_name, user_id, text)
 
         except Exception as e:
             logger.error("Error broadcasting translation: %s", str(e))
+            # Fallback: try to broadcast with just user ID
+            try:
+                fallback_message = {
+                    "type": message_type,
+                    "data": {
+                        "user_id": user_id,
+                        "user": f"User {user_id}",
+                        "text": text
+                    }
+                }
+                await self.broadcast_message(fallback_message)
+                logger.debug(
+                    "Fallback broadcast successful for user %s", user_id)
+            except Exception as fallback_error:
+                logger.error("Fallback broadcast also failed: %s",
+                             str(fallback_error))
 
     async def broadcast_message(self, message: Dict[str, Any]):
         """Broadcast a message to all connected clients."""
@@ -300,5 +362,30 @@ class WebSocketManager:
             "type": "user_toggle",
             "user_id": user_id,
             "enabled": enabled
+        }
+        await self.broadcast_message(message)
+
+    async def broadcast_user_joined(self, user_data: Dict[str, Any], enabled: bool):
+        """Broadcast user joined event to all clients."""
+        message = {
+            "type": "user_joined",
+            "user": user_data,
+            "enabled": enabled
+        }
+        await self.broadcast_message(message)
+
+    async def broadcast_user_left(self, user_id: str):
+        """Broadcast user left event to all clients."""
+        message = {
+            "type": "user_left",
+            "user_id": user_id
+        }
+        await self.broadcast_message(message)
+
+    async def broadcast_listen_status(self, is_listening: bool):
+        """Broadcast listening status to all clients."""
+        message = {
+            "type": "listen_status",
+            "is_listening": is_listening
         }
         await self.broadcast_message(message)

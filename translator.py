@@ -6,15 +6,16 @@ for Discord voice channels. It handles audio processing, language detection,
 transcription, and translation using machine learning models.
 """
 import asyncio
-import gc
 import os
-import subprocess
-import sys
-import struct  # CRITICAL FIX: Add missing struct import
 import traceback
-from typing import Callable
+import struct
+import time
+import sys
+import gc
+import subprocess
 import utils
 import translation
+from typing import Callable
 from custom_sink import RealTimeWaveSink
 from logging_config import get_logger
 
@@ -35,8 +36,10 @@ class VoiceTranslator:
         self.sink = None
         self.is_listening = False
         self.user_processing_enabled = {}  # Track which users have processing enabled
-        self.active_voices = {}  # Track active voice states - FIX: Add missing attribute
+        self.active_voices = {}  # Track active voice states
         self.connected_users = {}  # Track connected users
+        self.current_channel = None  # CRITICAL FIX: Add missing attribute
+        self.model_loaded = False  # CRITICAL FIX: Add missing attribute
         logger.info("✅ VoiceTranslator initialized")
 
     def set_websocket_handler(self, handler):
@@ -102,7 +105,8 @@ class VoiceTranslator:
                 user_id_str = str(member.id)
                 users.append({
                     'id': user_id_str,
-                    'name': member.display_name
+                    'name': member.display_name,
+                    'avatar': str(member.avatar.url) if member.avatar else None
                 })
                 # Ensure user is in processing states
                 if user_id_str not in self.user_processing_enabled:
@@ -170,9 +174,12 @@ class VoiceTranslator:
 
         except Exception as e:
             logger.error("Failed to start listening: %s", str(e))
-            import traceback
             logger.error("Traceback: %s", traceback.format_exc())
             return False
+
+    def _handle_audio_finished(self, sink, *args):
+        """Handle audio recording finished event."""
+        logger.debug("Audio recording finished")
 
     async def process_audio_callback(self, user_id, text, message_type):
         """Process audio transcription/translation callback."""
@@ -183,48 +190,16 @@ class VoiceTranslator:
             if message_type == "transcription":
                 logger.info(
                     "📝 Received transcription for user %s: %s", user_id, text)
-
-                # Get user info
-                if self.current_channel:
-                    member = self.current_channel.guild.get_member(
-                        int(user_id))
-                    user_name = member.display_name if member else f"User {user_id}"
-                else:
-                    user_name = f"User {user_id}"
-
                 # Send to WebSocket clients
                 if self.websocket_handler:
-                    await self.websocket_handler.broadcast_message({
-                        'type': 'transcription',
-                        'data': {
-                            'user': user_name,
-                            'user_id': str(user_id),
-                            'text': text
-                        }
-                    })
+                    await self.websocket_handler.broadcast_translation(user_id, text, "transcription")
 
             elif message_type == "translation":
                 logger.info(
                     "🌍 Received translation for user %s: %s", user_id, text)
-
-                # Get user info
-                if self.current_channel:
-                    member = self.current_channel.guild.get_member(
-                        int(user_id))
-                    user_name = member.display_name if member else f"User {user_id}"
-                else:
-                    user_name = f"User {user_id}"
-
-                # CRITICAL FIX: Send translation to WebSocket clients
+                # Send translation to WebSocket clients
                 if self.websocket_handler:
-                    await self.websocket_handler.broadcast_message({
-                        'type': 'translation',
-                        'data': {
-                            'user': user_name,
-                            'user_id': str(user_id),
-                            'text': text
-                        }
-                    })
+                    await self.websocket_handler.broadcast_translation(user_id, text, "translation")
                     logger.debug(
                         "✅ Translation message sent to WebSocket clients")
                 else:
@@ -233,6 +208,20 @@ class VoiceTranslator:
 
         except Exception as e:
             logger.error("Error in process_audio_callback: %s", str(e))
+
+    async def _get_user_display_name(self, user_id):
+        """Get user display name from Discord bot - simplified version."""
+        try:
+            if self.current_channel:
+                # Try to find user in current voice channel first
+                for member in self.current_channel.members:
+                    if str(member.id) == str(user_id):
+                        return member.display_name
+        except Exception as e:
+            logger.debug("Error getting user display name: %s", str(e))
+
+        # Fallback to generic name if we can't resolve it
+        return f"User {user_id}"
 
     async def toggle_user_processing(self, user_id, enabled):
         """Toggle processing for a specific user."""
@@ -283,33 +272,28 @@ class VoiceTranslator:
                 if after.channel == self.current_channel and before.channel != self.current_channel:
                     # Enable processing by default for new users
                     self.user_processing_enabled[user_id_str] = True
-                    logger.info("User %s joined voice channel",
+                    logger.info("👋 User %s joined voice channel",
                                 member.display_name)
 
                     # Send user joined update
                     if self.websocket_handler:
-                        await self.websocket_handler.broadcast_message({
-                            'type': 'user_joined',
-                            'user': {
-                                'id': user_id_str,
-                                'name': member.display_name
-                            },
-                            'enabled': True
-                        })
+                        user_data = {
+                            "id": user_id_str,
+                            "name": member.display_name,
+                            "avatar": str(member.avatar.url) if member.avatar else None
+                        }
+                        await self.websocket_handler.broadcast_user_joined(user_data, True)
 
                 # User left our channel
                 elif before.channel == self.current_channel and after.channel != self.current_channel:
                     # Remove from processing states
                     self.user_processing_enabled.pop(user_id_str, None)
-                    logger.info("User %s left voice channel",
+                    logger.info("👋 User %s left voice channel",
                                 member.display_name)
 
                     # Send user left update
                     if self.websocket_handler:
-                        await self.websocket_handler.broadcast_message({
-                            'type': 'user_left',
-                            'user_id': user_id_str
-                        })
+                        await self.websocket_handler.broadcast_user_left(user_id_str)
 
         except Exception as e:
             logger.error("Error handling voice state update: %s", str(e))
@@ -318,6 +302,9 @@ class VoiceTranslator:
         """Verify model loading capabilities and warm up models with timeout protection"""
         try:
             logger.info("Loading translation models...")
+            # Import utils module to access transcription functionality
+            import utils
+
             # Check if we have the transcribe function available
             if hasattr(utils, "transcribe"):
                 try:
@@ -345,8 +332,7 @@ class VoiceTranslator:
                 try:
                     utils._load_models_if_needed()
                     self.model_loaded = True
-                    logger.info(
-                        "✅ Models loaded successfully despite error")
+                    logger.info("✅ Models loaded successfully despite error")
                     return True
                 except Exception as load_error:
                     logger.error("Failed to load models: %s", str(load_error))
@@ -379,7 +365,7 @@ class VoiceTranslator:
 
             # Set parent reference to access user_processing_enabled dictionary
             if hasattr(self, 'user_processing_enabled'):
-                self.sink.parent = type('obj', (object,), {})
+                self.sink.parent = type('obj', (object,), {})()
                 processing_settings = {}
                 for k, v in self.user_processing_enabled.items():
                     processing_settings[str(k)] = bool(v)
@@ -398,9 +384,7 @@ class VoiceTranslator:
                         import server as server_module
 
                     if hasattr(server_module, 'user_processing_enabled'):
-                        self.sink.parent = type('obj', (object,), {})
-                        self.sink.parent.user_processing_enabled = server_module.user_processing_enabled
-                        logger.debug("Using server module user settings")
+                        self.sink.parent = server_module
                 except ImportError:
                     logger.debug("Could not import server module")
 
@@ -410,7 +394,7 @@ class VoiceTranslator:
                     try:
                         logger.debug("Audio callback executed successfully")
                     except Exception as e:
-                        logger.error("Audio callback error: %s", str(e))
+                        logger.error("Error in audio callback: %s", str(e))
                     return
                 return robust_process()
 
@@ -440,6 +424,11 @@ class VoiceTranslator:
             self.is_listening = True
             logger.debug("Started listening in channel: %s",
                          voice_client.channel.name)
+
+            # Broadcast listening status to all clients
+            if self.websocket_handler:
+                await self.websocket_handler.broadcast_listen_status(True)
+
             return True, "Started listening"
         except (ConnectionError, AttributeError, ValueError) as e:
             logger.error("Error in start_listening: %s", str(e))
@@ -477,6 +466,10 @@ class VoiceTranslator:
             self.is_listening = False
             logger.debug("Stopped listening")
 
+            # Broadcast listening status to all clients
+            if self.websocket_handler:
+                await self.websocket_handler.broadcast_listen_status(False)
+
             return True, "Stopped listening"
         except (ConnectionError, AttributeError) as e:
             logger.error("Error in stop_listening: %s", str(e))
@@ -502,16 +495,16 @@ class VoiceTranslator:
 
                 # Forward to translation callback
                 if self.translation_callback:
-                    await self.translation_callback(user_id, text_content, message_type=message_type)
+                    await self.translation_callback(user_id, text_content, message_type)
                 else:
-                    logger.warning(
-                        "No translation callback available for user %s", user_id)
+                    logger.warning("No translation callback available")
                 return
 
             # If we get here, it's an audio file processing request (legacy path)
             logger.warning(
                 "⚠️ Legacy audio file processing path called - this should not happen in current design")
             try:
+                import utils
                 # Get current queue size from sink if available for smart routing
                 current_queue_size = 0
                 if hasattr(self, 'sink') and hasattr(self.sink, 'workers'):
@@ -524,8 +517,6 @@ class VoiceTranslator:
 
                 # Skip processing if transcription was empty
                 if not transcribed_text:
-                    logger.debug(
-                        "Empty transcription result for user %s, skipping", user_id)
                     return
 
                 # Create transcription message
@@ -534,12 +525,15 @@ class VoiceTranslator:
                 await self.translation_callback(user_id, transcribed_text, message_type="transcription")
 
                 # Determine if translation is needed
+                import translation
                 needs_translation = await translation.should_translate(transcribed_text, detected_language)
 
                 if needs_translation:
-                    translated_text = await translation.translate(transcribed_text, target_language='en')
-                    await self.translation_callback(user_id, translated_text, message_type="translation")
+                    translated_text = await utils.translate(transcribed_text)
+                    if translated_text:
+                        await self.translation_callback(user_id, translated_text, message_type="translation")
                 else:
+                    # Send original text as translation
                     await self.translation_callback(user_id, transcribed_text, message_type="translation")
             finally:
                 # Always delete the file when done with it
@@ -604,7 +598,7 @@ class VoiceTranslator:
         for guild_id, voice_client in list(self.active_voices.items()):
             try:
                 if voice_client.is_connected():
-                    voice_client.stop_recording()
+                    asyncio.create_task(self.stop_listening(voice_client))
             except (AttributeError, ConnectionError) as e:
                 logger.error(
                     "Error during cleanup for guild %s: %s", guild_id, str(e))

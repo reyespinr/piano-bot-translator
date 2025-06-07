@@ -199,8 +199,12 @@ class PianoBotClient {
     }
 
     handleMessage(message) {
+        // Add debug logging for all incoming messages
+        console.log('📨 WebSocket message received:', message.type, message);
+        
         switch (message.type) {
             case 'status':
+                console.log('📊 Status update:', message);
                 this.handleStatusMessage(message);
                 break;
             case 'guilds':
@@ -228,9 +232,11 @@ class PianoBotClient {
                 this.updateUserList(message.users, message.enabled_states);
                 break;
             case 'user_joined':
+                console.log('🟢 User joined event:', message.user);
                 this.addUser(message.user, message.enabled);
                 break;
             case 'user_left':
+                console.log('🔴 User left event:', message.user_id);
                 this.removeUser(message.user_id);
                 break;
             case 'user_toggle':
@@ -367,56 +373,6 @@ class PianoBotClient {
         this.trimMessages(container);
     }
 
-    displayMessageWithContinuity(container, data, type) {
-        const user = data.user;
-        const text = data.text;
-        const userId = String(data.user_id); // Ensure userId is always a string
-        
-        // Get the appropriate last speaker
-        const lastSpeaker = this.lastSpeakers[type];
-        
-        // Get existing messages in container
-        const lastMessage = container.lastElementChild;
-        
-        // Check if we can combine with the last message
-        // Must be same user AND the last message in the container AND same user ID
-        if (lastSpeaker === user && lastMessage && String(lastMessage.dataset.userId) === userId) {
-            // Same speaker, append to existing message
-            const contentSpan = lastMessage.querySelector('.message-content');
-            if (contentSpan) {
-                // Add a space before appending the new text
-                contentSpan.textContent += ' ' + text.trim();
-                this.scrollToBottom(container);
-                return;
-            }
-        }
-        
-        // Different speaker or no previous message, create new message
-        this.createNewMessage(container, user, text, userId);
-        
-        // Update last speaker for this message type AFTER creating the message
-        this.lastSpeakers[type] = user;
-        
-        this.scrollToBottom(container);
-    }
-
-    createNewMessage(container, user, text, userId) {
-        const messageElement = document.createElement('div');
-        messageElement.className = 'message';
-        messageElement.dataset.userId = userId;
-        
-        const userElement = document.createElement('strong');
-        userElement.textContent = user + ': ';
-        
-        const contentElement = document.createElement('span');
-        contentElement.className = 'message-content';
-        contentElement.textContent = text.trim();
-        
-        messageElement.appendChild(userElement);
-        messageElement.appendChild(contentElement);
-        container.appendChild(messageElement);
-    }
-
     updateListenButton(listening) {
         this.isListening = listening;
         const button = this.elements.listenButton;
@@ -480,6 +436,7 @@ class PianoBotClient {
     }
 
     updateUserList(users, enabledStates) {
+        console.log('📋 Updating user list:', users, enabledStates);
         const container = this.getUserListContainer();
         container.innerHTML = '<h3 class="user-list-heading">Connected Users</h3>';
         
@@ -539,27 +496,43 @@ class PianoBotClient {
     }
 
     addUser(user, enabled) {
+        console.log('➕ Adding user toggle for:', user.name, `(${user.id})`);
         const container = this.getUserListContainer();
         const noUsersMsg = container.querySelector('.no-users');
-        if (noUsersMsg) noUsersMsg.remove();
+        if (noUsersMsg) {
+            noUsersMsg.remove();
+            console.log('🗑️ Removed "no users" message');
+        }
         
+        // Check if user already exists
         if (!document.getElementById(`user-${user.id}`)) {
             const userElement = this.createUserElement(user, enabled);
             container.appendChild(userElement);
+            console.log(`✅ Created toggle for user ${user.name} (${user.id})`);
+        } else {
+            console.log(`⚠️ Toggle already exists for user ${user.id}, skipping`);
         }
     }
 
     removeUser(userId) {
+        console.log('🗑️ Removing user toggle for:', userId);
         const userElement = document.getElementById(`user-${userId}`);
-        userElement?.remove();
+        if (userElement) {
+            userElement.remove();
+            console.log(`✅ Removed toggle for user ${userId}`);
+        } else {
+            console.log(`⚠️ No toggle found for user ${userId}`);
+        }
         
         // Show "no users" message if list is empty
         const container = this.getUserListContainer();
-        if (!container.querySelector('.user-toggle-item')) {
+        const userItems = container.querySelectorAll('.user-toggle-item');
+        if (userItems.length === 0) {
             const noUsers = document.createElement('p');
             noUsers.className = 'no-users';
             noUsers.textContent = 'No users connected';
             container.appendChild(noUsers);
+            console.log('📝 Added "no users" message');
         }
     }
 
@@ -604,21 +577,15 @@ class PianoBotClient {
     }
 
     pauseUpdates() {
-        // Remove buffer timer clearing since we're not using it anymore
-        // if (this.batchUpdateTimer) {
-        //     cancelAnimationFrame(this.batchUpdateTimer);
-        //     this.batchUpdateTimer = null;
-        // }
+        // Placeholder for future functionality
     }
 
     resumeUpdates() {
-        // Remove buffer processing since we're not using it anymore
-        // this.processBatchUpdates();
+        // Placeholder for future functionality
     }
 
     handleTranscription(data) {
         if (data) {
-            // Display immediately instead of buffering for transcriptions
             this.displayMessageWithContinuity(this.elements.transcriptionBox, data, 'transcription');
             this.trimMessages(this.elements.transcriptionBox);
         }
@@ -626,10 +593,57 @@ class PianoBotClient {
 
     handleTranslation(data) {
         if (data) {
-            // Display immediately instead of buffering for translations
             this.displayMessageWithContinuity(this.elements.translationsContainer, data, 'translation');
             this.trimMessages(this.elements.translationsContainer);
         }
+    }
+
+    displayMessageWithContinuity(container, data, type) {
+        const user = data.user;
+        const text = data.text;
+        const userId = String(data.user_id);
+        
+        // Get the appropriate last speaker
+        const lastSpeaker = this.lastSpeakers[type];
+        
+        // Get existing messages in container
+        const lastMessage = container.lastElementChild;
+        
+        // Check if we can combine with the last message
+        if (lastSpeaker === user && lastMessage && String(lastMessage.dataset.userId) === userId) {
+            // Same speaker, append to existing message
+            const contentSpan = lastMessage.querySelector('.message-content');
+            if (contentSpan) {
+                contentSpan.textContent += ' ' + text.trim();
+                this.scrollToBottom(container);
+                return;
+            }
+        }
+        
+        // Different speaker or no previous message, create new message
+        this.createNewMessage(container, user, text, userId);
+        
+        // Update last speaker for this message type AFTER creating the message
+        this.lastSpeakers[type] = user;
+        
+        this.scrollToBottom(container);
+    }
+
+    createNewMessage(container, user, text, userId) {
+        const messageElement = document.createElement('div');
+        messageElement.className = 'message';
+        messageElement.dataset.userId = userId;
+        
+        const userElement = document.createElement('strong');
+        userElement.textContent = user + ': ';
+        
+        const contentElement = document.createElement('span');
+        contentElement.className = 'message-content';
+        contentElement.textContent = text.trim();
+        
+        messageElement.appendChild(userElement);
+        messageElement.appendChild(contentElement);
+        container.appendChild(messageElement);
     }
 
     scrollToBottom(container) {

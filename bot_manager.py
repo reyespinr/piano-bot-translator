@@ -45,20 +45,152 @@ class DiscordBotManager:
             if member.bot:
                 return
 
+            # CRITICAL DEBUG: Check if websocket handler is available
+            websocket_available = (hasattr(self, 'voice_translator') and
+                                   self.voice_translator and
+                                   hasattr(self.voice_translator, 'websocket_handler') and
+                                   self.voice_translator.websocket_handler)
+
+            logger.debug(
+                "🔍 Voice state update - WebSocket handler available: %s", websocket_available)
+
+            # Get bot's current voice channel for comparison
+            bot_voice_channel = None
+            if (self.bot.voice_clients and len(self.bot.voice_clients) > 0):
+                bot_voice_channel = self.bot.voice_clients[0].channel
+
             # User joined a voice channel
             if before.channel is None and after.channel is not None:
                 logger.info("👋 User %s joined voice channel: %s",
                             member.display_name, after.channel.name)
                 user_id = str(member.id)
-                if user_id not in self.user_processing_enabled:
-                    self.user_processing_enabled[user_id] = True
-                    logger.info(
-                        "🔊 Enabled processing for new user: %s", member.display_name)
+
+                # If they joined our channel, enable processing and notify frontend
+                if bot_voice_channel and after.channel == bot_voice_channel:
+                    if user_id not in self.user_processing_enabled:
+                        self.user_processing_enabled[user_id] = True
+                        logger.info(
+                            "🔊 Enabled processing for new user: %s", member.display_name)
+
+                    # Update voice translator's user settings
+                    if self.voice_translator:
+                        self.voice_translator.user_processing_enabled[user_id] = True
+
+                    user_data = {
+                        "id": user_id,
+                        "name": member.display_name,
+                        "avatar": str(member.avatar.url) if member.avatar else None
+                    }
+
+                    # CRITICAL FIX: Add more detailed debugging for WebSocket broadcast
+                    if websocket_available:
+                        try:
+                            await self.voice_translator.websocket_handler.broadcast_user_joined(user_data, True)
+                            logger.info(
+                                "📡 Notified frontend: user %s joined", member.display_name)
+                        except Exception as broadcast_error:
+                            logger.error(
+                                "❌ Failed to broadcast user joined: %s", str(broadcast_error))
+                    else:
+                        logger.warning(
+                            "⚠️ Cannot notify frontend - WebSocket handler not available")
 
             # User left a voice channel
             elif before.channel is not None and after.channel is None:
                 logger.info("👋 User %s left voice channel: %s",
                             member.display_name, before.channel.name)
+
+                user_id = str(member.id)
+
+                # If they left our channel, clean up and notify frontend
+                if bot_voice_channel and before.channel == bot_voice_channel:
+                    # Clean up user processing state
+                    if user_id in self.user_processing_enabled:
+                        del self.user_processing_enabled[user_id]
+                        logger.info(
+                            "🔇 Removed processing for user: %s", member.display_name)
+
+                    # Update voice translator's user settings
+                    if (hasattr(self, 'voice_translator') and self.voice_translator):
+                        if user_id in self.voice_translator.user_processing_enabled:
+                            del self.voice_translator.user_processing_enabled[user_id]
+
+                    # CRITICAL FIX: Add more detailed debugging for WebSocket broadcast
+                    if websocket_available:
+                        try:
+                            await self.voice_translator.websocket_handler.broadcast_user_left(user_id)
+                            logger.info(
+                                "📡 Notified frontend: user %s left", member.display_name)
+                        except Exception as broadcast_error:
+                            logger.error(
+                                "❌ Failed to broadcast user left: %s", str(broadcast_error))
+                    else:
+                        logger.warning(
+                            "⚠️ Cannot notify frontend - WebSocket handler not available")
+
+            # User switched channels
+            elif before.channel != after.channel and before.channel is not None and after.channel is not None:
+                logger.info("👋 User %s switched from %s to %s",
+                            member.display_name, before.channel.name, after.channel.name)
+
+                user_id = str(member.id)
+
+                # Check if user left our channel
+                if bot_voice_channel and before.channel == bot_voice_channel:
+                    # User left our channel
+                    if user_id in self.user_processing_enabled:
+                        del self.user_processing_enabled[user_id]
+                        logger.info(
+                            "🔇 Removed processing for user: %s (switched channels)", member.display_name)
+
+                    # Update voice translator's user settings
+                    if (hasattr(self, 'voice_translator') and self.voice_translator):
+                        if user_id in self.voice_translator.user_processing_enabled:
+                            del self.voice_translator.user_processing_enabled[user_id]
+
+                    # CRITICAL FIX: Add more detailed debugging for WebSocket broadcast
+                    if websocket_available:
+                        try:
+                            await self.voice_translator.websocket_handler.broadcast_user_left(user_id)
+                            logger.info(
+                                "📡 Notified frontend: user %s left our channel", member.display_name)
+                        except Exception as broadcast_error:
+                            logger.error(
+                                "❌ Failed to broadcast user left: %s", str(broadcast_error))
+                    else:
+                        logger.warning(
+                            "⚠️ Cannot notify frontend - WebSocket handler not available")
+
+                # Check if user joined our channel
+                elif bot_voice_channel and after.channel == bot_voice_channel:
+                    # User joined our channel
+                    if user_id not in self.user_processing_enabled:
+                        self.user_processing_enabled[user_id] = True
+                        logger.info(
+                            "🔊 Enabled processing for user: %s (switched to our channel)", member.display_name)
+
+                    # Update voice translator's user settings
+                    if self.voice_translator:
+                        self.voice_translator.user_processing_enabled[user_id] = True
+
+                    user_data = {
+                        "id": user_id,
+                        "name": member.display_name,
+                        "avatar": str(member.avatar.url) if member.avatar else None
+                    }
+
+                    # CRITICAL FIX: Add more detailed debugging for WebSocket broadcast
+                    if websocket_available:
+                        try:
+                            await self.voice_translator.websocket_handler.broadcast_user_joined(user_data, True)
+                            logger.info(
+                                "📡 Notified frontend: user %s joined our channel", member.display_name)
+                        except Exception as broadcast_error:
+                            logger.error(
+                                "❌ Failed to broadcast user joined: %s", str(broadcast_error))
+                    else:
+                        logger.warning(
+                            "⚠️ Cannot notify frontend - WebSocket handler not available")
 
         return self.bot
 
@@ -275,18 +407,30 @@ class DiscordBotManager:
     def get_connected_users(self):
         """Get list of users connected to the current voice channel."""
         if not self.bot or not self.bot.voice_clients:
+            logger.debug("🔍 get_connected_users: No bot or voice clients")
             return []
 
         voice_client = self.bot.voice_clients[0]
         if not voice_client.channel:
+            logger.debug("🔍 get_connected_users: Voice client has no channel")
             return []
 
         users = []
+        logger.debug("🔍 get_connected_users: Channel has %d total members", len(
+            voice_client.channel.members))
+
         for member in voice_client.channel.members:
+            logger.debug("🔍 get_connected_users: Member %s (ID: %s, Bot: %s)",
+                         member.display_name, member.id, member.bot)
             if not member.bot:
-                users.append({
+                user_data = {
                     "id": str(member.id),
                     "name": member.display_name,
                     "avatar": str(member.avatar.url) if member.avatar else None
-                })
+                }
+                users.append(user_data)
+                logger.debug("🔍 get_connected_users: Added user %s", user_data)
+
+        logger.debug(
+            "🔍 get_connected_users: Returning %d users: %s", len(users), users)
         return users

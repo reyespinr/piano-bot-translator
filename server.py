@@ -72,8 +72,23 @@ async def lifespan(app: FastAPI):
         # Create voice translator
         voice_translator = VoiceTranslator(translation_callback)
 
+        # CRITICAL FIX: Set the WebSocket handler in voice translator IMMEDIATELY
+        voice_translator.set_websocket_handler(websocket_manager)
+        logger.info("🔗 WebSocket handler connected to voice translator")
+
         # Set voice translator in bot manager
         bot_manager.set_voice_translator(voice_translator)
+        logger.info("🔗 Voice translator connected to bot manager")
+
+        # CRITICAL FIX: Verify the connection chain
+        if (hasattr(bot_manager, 'voice_translator') and
+            bot_manager.voice_translator and
+            hasattr(bot_manager.voice_translator, 'websocket_handler') and
+                bot_manager.voice_translator.websocket_handler):
+            logger.info(
+                "✅ Connection chain verified: bot_manager -> voice_translator -> websocket_handler")
+        else:
+            logger.error("❌ Connection chain BROKEN!")
 
         # Create Discord bot
         bot = bot_manager.create_bot(translation_callback)
@@ -174,18 +189,18 @@ async def on_ready():
     """Bot ready event."""
     logger.info("🎯 Discord bot is ready! Logged in as %s", bot.user)
 
-    # Set up the voice translator with WebSocket handler
-    global voice_translator
-    if voice_translator:
+    # CRITICAL FIX: Re-verify and re-establish the connection chain when bot is ready
+    global voice_translator, websocket_manager
+    if voice_translator and websocket_manager:
         voice_translator.set_websocket_handler(websocket_manager)
+        logger.info(
+            "🔗 Re-established WebSocket handler connection after bot ready")
 
-
-@bot.event
-async def on_voice_state_update(member, before, after):
-    """Handle voice state updates for user tracking."""
-    global voice_translator
-    if voice_translator:
-        await voice_translator.handle_voice_state_update(member, before, after)
+        # Verify the connection is working
+        if (hasattr(voice_translator, 'websocket_handler') and voice_translator.websocket_handler):
+            logger.info("✅ WebSocket handler verified in voice translator")
+        else:
+            logger.error("❌ WebSocket handler NOT SET in voice translator!")
 
 
 # Initialize voice translator

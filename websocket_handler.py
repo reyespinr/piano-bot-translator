@@ -169,11 +169,43 @@ class WebSocketManager:
             await self.send_response(websocket, "join_channel", success, msg)
 
             if success:
+                # CRITICAL FIX: Add a small delay to ensure users are properly detected
+                await asyncio.sleep(0.2)
+
                 # Get connected users and send comprehensive status update
                 connected_users = self.bot_manager.get_connected_users()
 
+                # CRITICAL FIX: Debug logging to see what we're getting
+                logger.info(
+                    "🔍 DEBUG: Connected users from bot_manager: %s", connected_users)
+                logger.info("🔍 DEBUG: Bot manager user_processing_enabled: %s",
+                            self.bot_manager.user_processing_enabled)
+
                 # Sync user processing states
                 self.user_processing_enabled = self.bot_manager.user_processing_enabled.copy()
+
+                # CRITICAL FIX: If we have no users but the bot manager has processing enabled users,
+                # try to reconstruct the user list from the processing states
+                if not connected_users and self.bot_manager.user_processing_enabled:
+                    logger.warning(
+                        "🔍 No users from get_connected_users but processing states exist, attempting reconstruction...")
+
+                    # Try to get users from the current voice channel directly
+                    if (self.bot_manager.bot and self.bot_manager.bot.voice_clients and
+                            len(self.bot_manager.bot.voice_clients) > 0):
+                        voice_client = self.bot_manager.bot.voice_clients[0]
+                        if voice_client.channel:
+                            reconstructed_users = []
+                            for member in voice_client.channel.members:
+                                if not member.bot:
+                                    reconstructed_users.append({
+                                        "id": str(member.id),
+                                        "name": member.display_name,
+                                        "avatar": str(member.avatar.url) if member.avatar else None
+                                    })
+                            connected_users = reconstructed_users
+                            logger.info(
+                                "🔧 Reconstructed %d users from voice channel", len(connected_users))
 
                 # Send comprehensive status update to all clients
                 status_message = {
@@ -188,6 +220,8 @@ class WebSocketManager:
 
                 logger.info("📡 Broadcasting status update: %d users, %d enabled states",
                             len(connected_users), len(self.user_processing_enabled))
+                logger.info("🔍 DEBUG: Final status message users: %s",
+                            status_message["users"])
                 await self.broadcast_message(status_message)
 
         except Exception as e:
@@ -232,6 +266,20 @@ class WebSocketManager:
             enabled = bool(message.get("enabled", True))
 
             if user_id:
+                # CRITICAL FIX: Check if user is still in the channel before allowing toggle
+                connected_users = self.bot_manager.get_connected_users()
+                user_still_connected = any(
+                    user["id"] == user_id for user in connected_users)
+
+                if not user_still_connected:
+                    logger.warning(
+                        "⚠️ Attempted to toggle user %s who is no longer connected", user_id)
+                    await self.send_response(websocket, "toggle_user", False, "User is no longer in the channel")
+
+                    # Send user_left event to clean up frontend
+                    await self.broadcast_user_left(user_id)
+                    return
+
                 # Update all user processing state locations
                 self.user_processing_enabled[user_id] = enabled
                 self.bot_manager.user_processing_enabled[user_id] = enabled
@@ -367,20 +415,41 @@ class WebSocketManager:
 
     async def broadcast_user_joined(self, user_data: Dict[str, Any], enabled: bool):
         """Broadcast user joined event to all clients."""
-        message = {
-            "type": "user_joined",
-            "user": user_data,
-            "enabled": enabled
-        }
-        await self.broadcast_message(message)
+        try:
+            # Add user to local state tracking
+            user_id = user_data["id"]
+            self.user_processing_enabled[user_id] = enabled
+
+            message = {
+                "type": "user_joined",
+                "user": user_data,
+                "enabled": enabled
+            }
+            await self.broadcast_message(message)
+            logger.info("📡 Broadcasted user_joined event for user %s (%s)",
+                        user_data["name"], user_id)
+
+        except Exception as e:
+            logger.error("Error broadcasting user joined event: %s", str(e))
 
     async def broadcast_user_left(self, user_id: str):
         """Broadcast user left event to all clients."""
-        message = {
-            "type": "user_left",
-            "user_id": user_id
-        }
-        await self.broadcast_message(message)
+        try:
+            # CRITICAL FIX: Clean up local user processing state when user leaves
+            if user_id in self.user_processing_enabled:
+                del self.user_processing_enabled[user_id]
+                logger.info(
+                    "🔇 Cleaned up websocket user processing state for user %s", user_id)
+
+            message = {
+                "type": "user_left",
+                "user_id": user_id
+            }
+            await self.broadcast_message(message)
+            logger.info("📡 Broadcasted user_left event for user %s", user_id)
+
+        except Exception as e:
+            logger.error("Error broadcasting user left event: %s", str(e))
 
     async def broadcast_listen_status(self, is_listening: bool):
         """Broadcast listening status to all clients."""

@@ -14,9 +14,13 @@ import uuid
 import torch
 import models
 import audio_utils
+from audio_utils import COMMON_HALLUCINATIONS
 from logging_config import get_logger
 
 logger = get_logger(__name__)
+
+# CRITICAL RESTORATION: Add back the common hallucinations filtering
+# COMMON_HALLUCINATIONS moved to audio_utils.py
 
 
 def should_use_fast_model(audio_file_path, current_queue_size=0, concurrent_requests=0, active_transcriptions=0):
@@ -160,15 +164,19 @@ async def transcribe_with_model(audio_file, model, model_name, model_index=None)
                 logger.debug("🔓 [%s] Lock acquired for %s model",
                              transcription_id, model_display_name)
 
-                logger.debug("🎤 [%s] Starting %s model transcription (attempt 1)",
+                logger.debug("🎤 [%s] Starting %s model transcription with enhanced settings",
                              transcription_id, model_display_name)
 
-                # Perform transcription
+                # CRITICAL RESTORATION: Use enhanced transcription settings like the original
                 transcription_result = model.transcribe(
                     audio_file,
-                    vad=False,
-                    no_speech_threshold=0.8,
-                    word_timestamps=False
+                    vad=True,                  # Enable Voice Activity Detection
+                    vad_threshold=0.35,        # VAD confidence threshold
+                    no_speech_threshold=0.6,   # Filter non-speech sections
+                    max_instant_words=0.3,     # Reduce hallucination words
+                    suppress_silence=True,     # Use silence detection for better timestamps
+                    only_voice_freq=True,      # Focus on human voice frequency range
+                    word_timestamps=True       # Important for proper segmentation
                 )
 
                 logger.debug("✅ [%s] %s model transcription completed successfully",
@@ -206,19 +214,15 @@ async def transcribe_with_model(audio_file, model, model_name, model_index=None)
                          transcription_id, model_display_name)
             return None, None, None
 
-        # CRITICAL FIX: Handle WhisperResult object properly
+        # CRITICAL RESTORATION: Extract text and language with proper handling
         try:
-            # Check if it's a WhisperResult object (has 'text' attribute) or dict-like
             if hasattr(result, 'text'):
-                # WhisperResult object - access attributes directly
                 transcribed_text = getattr(result, 'text', '').strip()
                 detected_language = getattr(result, 'language', 'unknown')
             elif isinstance(result, dict):
-                # Dictionary-like object - use .get()
                 transcribed_text = result.get('text', '').strip()
                 detected_language = result.get('language', 'unknown')
             else:
-                # Unknown type - try to convert to string
                 logger.warning("⚠️ [%s] Unknown result type: %s",
                                transcription_id, type(result))
                 transcribed_text = str(result).strip() if result else ''
@@ -227,13 +231,58 @@ async def transcribe_with_model(audio_file, model, model_name, model_index=None)
         except Exception as result_error:
             logger.error("❌ [%s] Error extracting result data: %s",
                          transcription_id, str(result_error))
-            logger.error("❌ [%s] Result type: %s, Result: %s",
-                         transcription_id, type(result), str(result)[:100])
             return None, None, None
 
-        logger.debug("✅ [%s] %s model completed transcription: text='%s' (length: %d), language='%s'",
+        # CRITICAL RESTORATION: Handle Austrian German misidentified as Icelandic
+        if detected_language == "is":  # "is" is the language code for Icelandic
+            logger.info("🇦🇹 [%s] Detected Icelandic - likely Austrian German. Re-transcribing as German...",
+                        transcription_id)
+
+            # Re-transcribe with German as forced language
+            def retranscribe_task():
+                try:
+                    model_lock.acquire()
+                    return model.transcribe(
+                        audio_file,
+                        vad=True,
+                        vad_threshold=0.35,
+                        no_speech_threshold=0.6,
+                        max_instant_words=0.3,
+                        suppress_silence=True,
+                        only_voice_freq=True,
+                        word_timestamps=True,
+                        language="de"  # Force German language
+                    )
+                finally:
+                    model_lock.release()
+
+            loop = asyncio.get_event_loop()
+            retry_result = await loop.run_in_executor(None, retranscribe_task)
+
+            if retry_result:
+                if hasattr(retry_result, 'text'):
+                    transcribed_text = getattr(
+                        retry_result, 'text', '').strip()
+                elif isinstance(retry_result, dict):
+                    transcribed_text = retry_result.get('text', '').strip()
+
+                detected_language = "de"  # Override detected language to German
+                result = retry_result  # Use the re-transcribed result for confidence analysis
+                logger.info("🇩🇪 [%s] Re-transcribed as German: %s",
+                            transcription_id, transcribed_text[:50])
+
+        # CRITICAL RESTORATION: Apply confidence filtering
+        confidence_passed, confidence_score = apply_confidence_filtering(
+            result, transcribed_text, transcription_id)
+
+        if not confidence_passed:
+            logger.debug("🔇 [%s] Transcription filtered out due to low confidence: %.2f",
+                         transcription_id, confidence_score)
+            return "", detected_language, result
+
+        logger.debug("✅ [%s] %s model completed transcription: text='%s' (length: %d), language='%s', confidence=%.2f",
                      transcription_id, model_display_name, transcribed_text,
-                     len(transcribed_text), detected_language)
+                     len(transcribed_text), detected_language, confidence_score)
 
         # CRITICAL FIX: Always perform cleanup operations regardless of fast/accurate
         try:
@@ -380,42 +429,52 @@ async def transcribe(audio_file, current_queue_size=0):
         logger.debug("🚨 CRITICAL: [%s] transcribe_with_model returned: text='%s', language='%s'",
                      transcription_id, transcribed_text, detected_language)
 
-        # CRITICAL FIX: Handle different result types from WhisperResult
+        # CRITICAL RESTORATION: Extract confidence using the same method as your original code
+        confidence = 0.0
         try:
-            # Check if result is a WhisperResult object or a dictionary
-            if hasattr(result, 'avg_logprob'):
-                # WhisperResult object - access attributes directly
-                confidence = getattr(result, 'avg_logprob', 0)
-            elif hasattr(result, '__dict__') and 'avg_logprob' in result.__dict__:
-                # Object with avg_logprob in __dict__
-                confidence = result.__dict__.get('avg_logprob', 0)
-            elif isinstance(result, dict):
-                # Dictionary - use .get() method
-                confidence = result.get('avg_logprob', 0)
+            # Use the same confidence extraction logic as your original function
+            if hasattr(result, "segments") and result.segments:
+                # Get confidence values from segments (like your original code)
+                confidences = []
+                for segment in result.segments:
+                    if hasattr(segment, "avg_logprob"):
+                        confidences.append(segment.avg_logprob)
+                
+                # Apply your original confidence thresholds if we have confidence data
+                if confidences:
+                    confidence = sum(confidences) / len(confidences)
+                    logger.info("Transcription confidence: %.2f, Language: %s",
+                               confidence, detected_language)
+                else:
+                    logger.debug("[%s] No segment confidence data available", transcription_id)
             else:
-                # Fallback - no confidence available
-                logger.debug("[%s] No confidence information available from result type: %s",
-                             transcription_id, type(result).__name__)
-                confidence = 0
+                # Fallback: try to get confidence from result level
+                if hasattr(result, 'avg_logprob'):
+                    confidence = getattr(result, 'avg_logprob', 0.0)
+                    logger.info("Transcription confidence: %.2f (result-level), Language: %s",
+                               confidence, detected_language)
+                elif isinstance(result, dict) and 'avg_logprob' in result:
+                    confidence = result['avg_logprob']
+                    logger.info("Transcription confidence: %.2f (dict), Language: %s",
+                               confidence, detected_language)
+                else:
+                    logger.debug("[%s] No confidence information available from result type: %s",
+                                transcription_id, type(result).__name__)
 
         except (AttributeError, TypeError) as e:
-            logger.debug(
-                "[%s] Error extracting confidence: %s, using default", transcription_id, str(e))
-            confidence = 0
+            logger.debug("[%s] Error extracting confidence: %s, using default", 
+                        transcription_id, str(e))
+            confidence = 0.0
 
         # Check transcription results
         if result is None or not transcribed_text:
-            logger.warning(
-                "⚠️ [%s] Empty transcription result", transcription_id)
+            logger.warning("⚠️ [%s] Empty transcription result", transcription_id)
             return "", "unknown"
 
-        # Validate transcription confidence
-        logger.info("Transcription confidence: %.2f, Language: %s",
-                    confidence, detected_language)
-
+        # CRITICAL RESTORATION: Apply the same confidence threshold as your original
         if confidence < -1.0:
-            logger.debug(
-                "🔇 [%s] Low confidence transcription (%.2f), returning empty", transcription_id, confidence)
+            logger.debug("🔇 [%s] Low confidence transcription (%.2f), returning empty", 
+                        transcription_id, confidence)
             return "", detected_language
 
         # Mark transcription as successful
@@ -497,3 +556,76 @@ async def transcribe(audio_file, current_queue_size=0):
         cleanup_status = "COMPLETED" if cleanup_completed else "FAILED"
         logger.debug("🧹 [%s] CLEANUP: transcribe() cleanup %s (transcription: %s)",
                      transcription_id, cleanup_status, status)
+
+
+def apply_confidence_filtering(result, transcribed_text, transcription_id):
+    """Apply confidence filtering to transcription results using the original logic.
+    
+    Returns:
+        tuple: (passed_filter: bool, confidence_score: float)
+    """
+    try:
+        # CRITICAL RESTORATION: Use the exact same logic as your original function
+        confidences = []
+        if hasattr(result, "segments") and result.segments:
+            # Get confidence values from segments (exactly like your original)
+            for segment in result.segments:
+                if hasattr(segment, "avg_logprob"):
+                    confidences.append(segment.avg_logprob)
+        
+        # Apply confidence filtering if we have confidence data (like your original)
+        if confidences:
+            avg_log_prob = sum(confidences) / len(confidences)
+            
+            # General confidence threshold (same as your original)
+            confidence_threshold = -1.5
+            if avg_log_prob < confidence_threshold:
+                logger.debug("[%s] Low confidence transcription rejected (%.2f): '%s'",
+                           transcription_id, avg_log_prob, transcribed_text)
+                return False, avg_log_prob
+            
+            # CRITICAL RESTORATION: Special case for common hallucinations (same as original)
+            text = transcribed_text.strip().lower()
+            text_clean = text.translate(str.maketrans('', '', string.punctuation))
+            
+            if len(text_clean) < 15 and text_clean in COMMON_HALLUCINATIONS:
+                # For these common short responses, require higher confidence (same as original)
+                stricter_threshold = -0.5
+                if avg_log_prob < stricter_threshold:
+                    logger.debug("[%s] Short hallucination '%s' rejected with confidence %.2f",
+                               transcription_id, text, avg_log_prob)
+                    return False, avg_log_prob
+            
+            logger.debug("[%s] Transcription confidence: %.2f, passed filtering",
+                        transcription_id, avg_log_prob)
+            return True, avg_log_prob
+        else:
+            # No confidence data available - this shouldn't happen with proper Whisper results
+            logger.warning("[%s] No confidence data available from segments - result type: %s",
+                          transcription_id, type(result).__name__)
+            
+            # Try to get confidence from result object directly as fallback
+            if hasattr(result, 'avg_logprob'):
+                confidence = getattr(result, 'avg_logprob', 0.0)
+                logger.debug("[%s] Using result-level confidence: %.2f", transcription_id, confidence)
+                return confidence >= -1.5, confidence
+            
+            # Basic text quality filtering as last resort
+            if not transcribed_text or len(transcribed_text.strip()) < 2:
+                return False, 0.0
+            
+            # Check for obvious hallucinations without confidence
+            text_clean = transcribed_text.strip().lower().translate(
+                str.maketrans('', '', string.punctuation))
+            
+            if len(text_clean) < 10 and text_clean in COMMON_HALLUCINATIONS:
+                logger.debug("[%s] Short hallucination '%s' filtered without confidence data",
+                           transcription_id, text_clean)
+                return False, 0.0
+            
+            logger.warning("[%s] No confidence data - accepting by default", transcription_id)
+            return True, 0.0  # Default to accepting if no confidence data
+            
+    except Exception as e:
+        logger.error("Error in confidence filtering: %s", str(e))
+        return True, 0.0  # Default to accepting on error

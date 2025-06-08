@@ -452,7 +452,7 @@ class RealTimeWaveSink(WaveSink):
         """Create audio file and queue for transcription."""
         try:
             # Create unique filename
-            audio_filename = f"speech_{user}_{int(current_time * 1000)}.wav"
+            audio_filename = f"{user}_{int(current_time * 1000)}_speech.wav"
 
             # Write audio buffer to file
             user_state.speech_buffer.seek(0)

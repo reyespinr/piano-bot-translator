@@ -6,6 +6,7 @@ Whisper models, with intelligent routing between accurate and fast models.
 """
 import asyncio
 import gc
+import random
 import string
 import threading
 import time
@@ -23,14 +24,64 @@ logger = get_logger(__name__)
 # COMMON_HALLUCINATIONS moved to audio_utils.py
 
 
+async def transcribe(audio_file, current_queue_size=0, concurrent_requests=0, active_transcriptions=0):
+    """
+    Main transcription function with intelligent model routing.
+
+    Args:
+        audio_file: Path to audio file to transcribe
+        current_queue_size: Current queue size for smart routing
+        concurrent_requests: Number of concurrent requests
+        active_transcriptions: Number of active transcriptions
+
+    Returns:
+        tuple: (transcribed_text, detected_language)
+    """
+    transcription_id = str(uuid.uuid4())[:8]
+    logger.debug("🎬 [%s] ENTRY: transcribe() called for file: %s",
+                 transcription_id, audio_file)
+
+    try:
+        # Load models
+        logger.debug("🔧 [%s] Loading models...", transcription_id)
+        model_accurate, model_fast_pool = models.load_models_if_needed()
+
+        # Determine model routing based on audio characteristics and system load
+        use_fast = should_use_fast_model(
+            audio_file, current_queue_size, concurrent_requests, active_transcriptions)
+
+        if use_fast:
+            logger.debug("🚀 [%s] Using FAST model...", transcription_id)
+            selected_model_index = models.select_fast_model()
+            transcribed_text, detected_language, result = await transcribe_with_model(
+                audio_file, model_fast_pool[selected_model_index], "fast", selected_model_index
+            )
+        else:
+            logger.debug("🎯 [%s] Using ACCURATE model...", transcription_id)
+            transcribed_text, detected_language, result = await transcribe_with_model(
+                audio_file, model_accurate, "accurate"
+            )
+
+        # Return the transcription results
+        logger.debug("🎉 [%s] SUCCESS: transcribe() returning: text='%s', lang=%s",
+                     transcription_id, transcribed_text[:50] if transcribed_text else "None", detected_language)
+        return transcribed_text, detected_language
+
+    except Exception as e:
+        logger.error("❌ [%s] Error in transcribe(): %s",
+                     transcription_id, str(e))
+        logger.error("❌ [%s] Transcribe error traceback: %s",
+                     transcription_id, traceback.format_exc())
+        return "", "error"
+
+
 def should_use_fast_model(audio_file_path, current_queue_size=0, concurrent_requests=0, active_transcriptions=0):
     """Determine which model to use based on audio duration and system load"""
 
     # Get audio duration
-    duration = audio_utils.get_audio_duration_from_file(audio_file_path)
-
-    # Check if accurate model is currently busy
-    accurate_busy = models.MODEL_USAGE_STATS["accurate_model_busy"]
+    duration = audio_utils.get_audio_duration_from_file(
+        audio_file_path)    # Check if accurate model is currently busy
+    accurate_busy = models.MODEL_USAGE_STATS["accurate_busy"]
 
     # Check how many fast models are available
     available_fast_models = models.count_available_fast_models()
@@ -96,13 +147,24 @@ def is_recoverable_error(error_str):
         "Error closing file",
         "RuntimeError: NYI",  # TorchScript VAD errors
         "Error submitting a packet to the muxer",  # FFmpeg packet errors
-        "vad_annotator.py"  # Any VAD-related errors
+        "vad_annotator.py",  # Any VAD-related errors
+        "Error muxing a packet",  # Additional FFmpeg muxer errors
+        "Task finished with error code",  # FFmpeg task errors
+        "Terminating thread with return code",  # FFmpeg thread errors
+        "out#0/s16le",  # FFmpeg output format errors
+        "aost#0:0/pcm_s16le",  # FFmpeg audio stream errors
+        "ffmpeg",  # General FFmpeg errors
+        "av_",  # FFmpeg/libav function errors
+        "codec",  # Audio codec errors
+        "format"  # Audio format errors
     ]
 
     return (any(error in error_str for error in recoverable_errors) or
             "tensor" in error_str.lower() or
             "NYI" in error_str or
-            "TorchScript" in error_str)  # Catch TorchScript errors
+            "TorchScript" in error_str or
+            "ffmpeg" in error_str.lower() or
+            "libav" in error_str.lower())  # Catch all FFmpeg/audio errors
 
 
 def reset_model_state(model):
@@ -152,55 +214,94 @@ async def transcribe_with_model(audio_file, model, model_name, model_index=None)
                      transcription_id, model_display_name)
 
         def transcribe_task():
-            """Synchronous transcription task with comprehensive cleanup."""
+            """Synchronous transcription task with comprehensive cleanup and FFmpeg error handling."""
             transcription_result = None
             lock_acquired = False
+            retry_count = 0
+            max_retries = 2
 
-            try:
-                logger.debug("🔒 [%s] Acquiring lock for %s model",
-                             transcription_id, model_display_name)
-                model_lock.acquire()
-                lock_acquired = True
-                logger.debug("🔓 [%s] Lock acquired for %s model",
-                             transcription_id, model_display_name)
+            while retry_count <= max_retries:
+                try:
+                    logger.debug("🔒 [%s] Acquiring lock for %s model (attempt %d)",
+                                 transcription_id, model_display_name, retry_count + 1)
+                    model_lock.acquire()
+                    lock_acquired = True
+                    logger.debug("🔓 [%s] Lock acquired for %s model",
+                                 transcription_id, model_display_name)
 
-                logger.debug("🎤 [%s] Starting %s model transcription with enhanced settings",
-                             transcription_id, model_display_name)
+                    logger.debug("🎤 [%s] Starting %s model transcription with enhanced settings (attempt %d)",
+                                 transcription_id, model_display_name, retry_count + 1)
 
-                # CRITICAL RESTORATION: Use enhanced transcription settings like the original
-                transcription_result = model.transcribe(
-                    audio_file,
-                    vad=True,                  # Enable Voice Activity Detection
-                    vad_threshold=0.35,        # VAD confidence threshold
-                    no_speech_threshold=0.6,   # Filter non-speech sections
-                    max_instant_words=0.3,     # Reduce hallucination words
-                    suppress_silence=True,     # Use silence detection for better timestamps
-                    only_voice_freq=True,      # Focus on human voice frequency range
-                    word_timestamps=True       # Important for proper segmentation
-                )
+                    # CRITICAL RESTORATION: Use enhanced transcription settings like the original
+                    transcription_result = model.transcribe(
+                        audio_file,
+                        vad=True,                  # Enable Voice Activity Detection
+                        vad_threshold=0.35,        # VAD confidence threshold
+                        no_speech_threshold=0.6,   # Filter non-speech sections
+                        max_instant_words=0.3,     # Reduce hallucination words
+                        suppress_silence=True,     # Use silence detection for better timestamps
+                        only_voice_freq=True,      # Focus on human voice frequency range
+                        word_timestamps=True       # Important for proper segmentation
+                    )
 
-                logger.debug("✅ [%s] %s model transcription completed successfully",
-                             transcription_id, model_display_name)
+                    logger.debug("✅ [%s] %s model transcription completed successfully",
+                                 transcription_id, model_display_name)
 
-                return transcription_result
+                    return transcription_result
 
-            except Exception as e:
-                logger.error("❌ [%s] %s model transcription failed: %s",
-                             transcription_id, model_display_name, str(e))
-                return None
-            finally:
-                # CRITICAL FIX: Always release the lock with comprehensive error handling
-                if lock_acquired:
-                    try:
-                        model_lock.release()
-                        logger.debug("🔓 [%s] %s model lock released in finally block",
-                                     transcription_id, model_display_name)
-                    except Exception as lock_error:
-                        logger.error("❌ [%s] Error releasing %s model lock: %s",
-                                     transcription_id, model_display_name, str(lock_error))
-                else:
-                    logger.warning("⚠️ [%s] %s model lock was not acquired, skipping release",
-                                   transcription_id, model_display_name)
+                except Exception as e:
+                    error_str = str(e)
+                    logger.error("❌ [%s] %s model transcription failed (attempt %d): %s",
+                                 transcription_id, model_display_name, retry_count + 1, error_str)
+
+                    # Check if this is a recoverable FFmpeg/audio error
+                    if retry_count < max_retries and is_recoverable_error(error_str):
+                        logger.warning("🔄 [%s] Recoverable error detected, retrying transcription (attempt %d/%d): %s",
+                                       transcription_id, retry_count + 1, max_retries, error_str)
+
+                        # Release lock before retry
+                        if lock_acquired:
+                            try:
+                                model_lock.release()
+                                lock_acquired = False
+                                logger.debug(
+                                    "🔓 [%s] Released lock for retry", transcription_id)
+                            except Exception as lock_error:
+                                logger.error("❌ [%s] Error releasing lock for retry: %s",
+                                             transcription_id, str(lock_error))
+
+                        # Reset model state if needed
+                        try:
+                            reset_model_state(model)
+                            logger.debug(
+                                "🔄 [%s] Model state reset for retry", transcription_id)
+                        except Exception as reset_error:
+                            logger.warning("⚠️ [%s] Failed to reset model state: %s",
+                                           transcription_id, str(reset_error))
+
+                        retry_count += 1
+                        time.sleep(0.5 * retry_count)  # Exponential backoff
+                        continue
+                    else:
+                        logger.error("💥 [%s] Non-recoverable error or max retries exceeded: %s",
+                                     transcription_id, error_str)
+                        return None
+
+                finally:
+                    # CRITICAL FIX: Always release the lock with comprehensive error handling
+                    if lock_acquired:
+                        try:
+                            model_lock.release()
+                            logger.debug("🔓 [%s] %s model lock released in finally block",
+                                         transcription_id, model_display_name)
+                        except Exception as lock_error:
+                            logger.error("❌ [%s] Error releasing %s model lock: %s",
+                                         transcription_id, model_display_name, str(lock_error))
+                    else:
+                        logger.warning("⚠️ [%s] %s model lock was not acquired, skipping release",
+                                       transcription_id, model_display_name)
+
+            return None
 
         # Execute transcription in thread pool
         loop = asyncio.get_event_loop()
@@ -324,243 +425,9 @@ async def transcribe_with_model(audio_file, model, model_name, model_index=None)
         return None, None, None
 
 
-async def transcribe(audio_file, current_queue_size=0):
-    """
-    Enhanced transcribe function with bulletproof lock cleanup.
-
-    CRITICAL FIX: Ensures that all transcriptions complete their callback chain
-    by implementing comprehensive cleanup and state management.
-    """
-    transcription_id = str(uuid.uuid4())[:8]
-    logger.debug("🎬 [%s] ENTRY: transcribe() called for file: %s",
-                 transcription_id, audio_file)
-
-    # CRITICAL FIX: Add comprehensive state tracking for debugging
-    entry_stats = None
-    cleanup_completed = False
-    transcription_successful = False
-
-    try:
-        # CRITICAL FIX: Enhanced lock acquisition with better error handling
-        max_lock_attempts = 5  # Increased from 3
-        for attempt in range(max_lock_attempts):
-            try:
-                logger.debug(
-                    "🔐 [%s] Attempting to acquire stats lock...", transcription_id)
-
-                # CRITICAL FIX: Use a shorter timeout but more attempts
-                # Reduced from 1.0 to 0.5
-                if models.MODEL_USAGE_STATS["stats_lock"].acquire(timeout=0.5):
-                    try:
-                        models.MODEL_USAGE_STATS["concurrent_requests"] += 1
-                        entry_stats = {
-                            'concurrent': models.MODEL_USAGE_STATS["concurrent_requests"],
-                            'active': models.MODEL_USAGE_STATS["active_transcriptions"]
-                        }
-                        logger.debug("🔢 [%s] Concurrent requests: %d, Active: %d (Lock acquired by: %s)",
-                                     transcription_id, entry_stats['concurrent'], entry_stats['active'],
-                                     threading.current_thread().name)
-                    finally:
-                        models.MODEL_USAGE_STATS["stats_lock"].release()
-                        logger.debug(
-                            "🔓 [%s] Stats lock released successfully", transcription_id)
-                    break
-                else:
-                    logger.warning(
-                        "⚠️ [%s] Stats lock busy on attempt %d, retrying...", transcription_id, attempt + 1)
-                    # CRITICAL FIX: Exponential backoff with jitter
-                    await asyncio.sleep(0.1 * (1.5 ** attempt) + random.uniform(0, 0.1))
-
-            except Exception as lock_error:
-                logger.error("❌ [%s] Lock acquisition error on attempt %d: %s",
-                             transcription_id, attempt + 1, str(lock_error))
-                await asyncio.sleep(0.1 * (attempt + 1))
-        else:
-            # All attempts failed
-            logger.error("❌ [%s] Failed to acquire stats lock after %d attempts",
-                         transcription_id, max_lock_attempts)
-
-            # CRITICAL FIX: Emergency recovery - try emergency reset
-            emergency_reset_successful = await models.emergency_lock_reset()
-            if emergency_reset_successful:
-                logger.warning(
-                    "🔧 [%s] Emergency reset successful, retrying lock acquisition", transcription_id)
-                try:
-                    with models.MODEL_USAGE_STATS["stats_lock"]:
-                        models.MODEL_USAGE_STATS["concurrent_requests"] += 1
-                        entry_stats = {
-                            'concurrent': models.MODEL_USAGE_STATS["concurrent_requests"],
-                            'active': models.MODEL_USAGE_STATS["active_transcriptions"]
-                        }
-                    logger.info(
-                        "✅ [%s] Lock acquired after emergency reset", transcription_id)
-                except Exception as emergency_error:
-                    logger.error("❌ [%s] Emergency reset also failed: %s",
-                                 transcription_id, str(emergency_error))
-                    raise RuntimeError(
-                        f"Lock acquisition failed after emergency reset: {emergency_error}")
-            else:
-                raise RuntimeError(
-                    "Failed to acquire stats lock and emergency reset failed")
-
-        # Load models
-        logger.debug("🔧 [%s] Loading models...", transcription_id)
-        model_accurate, model_fast_pool = models.load_models_if_needed()
-
-        # Determine model routing
-        logger.debug("🎯 [%s] Determining model routing...", transcription_id)
-        use_accurate, routing_reason = models.determine_model_routing(
-            audio_file, current_queue_size, entry_stats)
-
-        # Execute transcription based on routing decision
-        if use_accurate:
-            logger.debug("🎯 [%s] Using ACCURATE model...", transcription_id)
-            transcribed_text, detected_language, result = await transcribe_with_model(
-                audio_file, model_accurate, "accurate"
-            )
-        else:
-            logger.debug("🚀 [%s] Using FAST model...", transcription_id)
-            selected_model_index = models.select_fast_model()
-            transcribed_text, detected_language, result = await transcribe_with_model(
-                audio_file, model_fast_pool[selected_model_index], "fast", selected_model_index
-            )
-
-        # CRITICAL DEBUG: Add this log to see what we get back from transcription
-        logger.debug("🚨 CRITICAL: [%s] transcribe_with_model returned: text='%s', language='%s'",
-                     transcription_id, transcribed_text, detected_language)
-
-        # CRITICAL RESTORATION: Extract confidence using the same method as your original code
-        confidence = 0.0
-        try:
-            # Use the same confidence extraction logic as your original function
-            if hasattr(result, "segments") and result.segments:
-                # Get confidence values from segments (like your original code)
-                confidences = []
-                for segment in result.segments:
-                    if hasattr(segment, "avg_logprob"):
-                        confidences.append(segment.avg_logprob)
-                
-                # Apply your original confidence thresholds if we have confidence data
-                if confidences:
-                    confidence = sum(confidences) / len(confidences)
-                    logger.info("Transcription confidence: %.2f, Language: %s",
-                               confidence, detected_language)
-                else:
-                    logger.debug("[%s] No segment confidence data available", transcription_id)
-            else:
-                # Fallback: try to get confidence from result level
-                if hasattr(result, 'avg_logprob'):
-                    confidence = getattr(result, 'avg_logprob', 0.0)
-                    logger.info("Transcription confidence: %.2f (result-level), Language: %s",
-                               confidence, detected_language)
-                elif isinstance(result, dict) and 'avg_logprob' in result:
-                    confidence = result['avg_logprob']
-                    logger.info("Transcription confidence: %.2f (dict), Language: %s",
-                               confidence, detected_language)
-                else:
-                    logger.debug("[%s] No confidence information available from result type: %s",
-                                transcription_id, type(result).__name__)
-
-        except (AttributeError, TypeError) as e:
-            logger.debug("[%s] Error extracting confidence: %s, using default", 
-                        transcription_id, str(e))
-            confidence = 0.0
-
-        # Check transcription results
-        if result is None or not transcribed_text:
-            logger.warning("⚠️ [%s] Empty transcription result", transcription_id)
-            return "", "unknown"
-
-        # CRITICAL RESTORATION: Apply the same confidence threshold as your original
-        if confidence < -1.0:
-            logger.debug("🔇 [%s] Low confidence transcription (%.2f), returning empty", 
-                        transcription_id, confidence)
-            return "", detected_language
-
-        # Mark transcription as successful
-        transcription_successful = True
-        logger.debug("🎉 [%s] SUCCESS: transcribe() returning: text='%s', lang=%s",
-                     transcription_id, transcribed_text[:50] if transcribed_text else "None", detected_language)
-
-        # CRITICAL FIX: Force a small delay before cleanup to ensure all async operations complete
-        # 100ms delay to ensure callback chain readiness
-        await asyncio.sleep(0.1)
-
-        return transcribed_text.strip(), detected_language
-
-    except Exception as e:
-        logger.error("❌ [%s] Transcription error: %s",
-                     transcription_id, str(e))
-        logger.error("❌ [%s] Transcription traceback: %s",
-                     transcription_id, traceback.format_exc())
-        return "", "error"
-
-    finally:
-        # CRITICAL FIX: Enhanced cleanup with multiple retry attempts and bulletproof error handling
-        logger.debug("🧹 [%s] Starting cleanup operations...", transcription_id)
-
-        if entry_stats is not None:  # Only cleanup if we successfully incremented
-            cleanup_max_attempts = 5  # Increased retry attempts
-            for cleanup_attempt in range(cleanup_max_attempts):
-                try:
-                    logger.debug("🔐 [%s] Cleanup attempt %d: Trying to acquire stats lock...",
-                                 transcription_id, cleanup_attempt + 1)
-
-                    # CRITICAL FIX: Use shorter timeout but more attempts for cleanup
-                    # Short timeout
-                    if models.MODEL_USAGE_STATS["stats_lock"].acquire(timeout=0.3):
-                        try:
-                            if models.MODEL_USAGE_STATS["concurrent_requests"] > 0:
-                                models.MODEL_USAGE_STATS["concurrent_requests"] -= 1
-                                logger.debug("🔓 [%s] Successfully decremented concurrent requests (attempt %d) - now: %d",
-                                             transcription_id, cleanup_attempt + 1, models.MODEL_USAGE_STATS["concurrent_requests"])
-                                cleanup_completed = True
-                            else:
-                                logger.warning(
-                                    "⚠️ [%s] Concurrent requests already at 0, skipping decrement", transcription_id)
-                                cleanup_completed = True
-                        finally:
-                            models.MODEL_USAGE_STATS["stats_lock"].release()
-                            logger.debug(
-                                "🔓 [%s] Cleanup lock released successfully", transcription_id)
-
-                        break  # Success, exit retry loop
-
-                    else:
-                        logger.warning("⚠️ [%s] Cleanup lock busy on attempt %d, retrying...",
-                                       transcription_id, cleanup_attempt + 1)
-                        # CRITICAL FIX: Shorter delays for cleanup retries
-                        await asyncio.sleep(0.05 * (cleanup_attempt + 1))
-
-                except Exception as cleanup_error:
-                    logger.error("❌ [%s] Cleanup attempt %d failed: %s",
-                                 transcription_id, cleanup_attempt + 1, str(cleanup_error))
-                    await asyncio.sleep(0.05 * (cleanup_attempt + 1))
-
-            if not cleanup_completed:
-                logger.error("❌ [%s] CRITICAL: Cleanup failed after %d attempts - this may cause lock issues",
-                             transcription_id, cleanup_max_attempts)
-                # CRITICAL FIX: Force emergency reset if cleanup completely fails
-                try:
-                    logger.warning(
-                        "🚨 [%s] Forcing emergency reset due to cleanup failure...", transcription_id)
-                    await models.emergency_lock_reset()
-                    logger.warning(
-                        "✅ [%s] Emergency reset completed after cleanup failure", transcription_id)
-                except Exception as emergency_error:
-                    logger.error("💥 [%s] Emergency reset after cleanup failure also failed: %s",
-                                 transcription_id, str(emergency_error))
-
-        # CRITICAL FIX: Final status logging
-        status = "SUCCESS" if transcription_successful else "FAILED"
-        cleanup_status = "COMPLETED" if cleanup_completed else "FAILED"
-        logger.debug("🧹 [%s] CLEANUP: transcribe() cleanup %s (transcription: %s)",
-                     transcription_id, cleanup_status, status)
-
-
 def apply_confidence_filtering(result, transcribed_text, transcription_id):
     """Apply confidence filtering to transcription results using the original logic.
-    
+
     Returns:
         tuple: (passed_filter: bool, confidence_score: float)
     """
@@ -572,60 +439,63 @@ def apply_confidence_filtering(result, transcribed_text, transcription_id):
             for segment in result.segments:
                 if hasattr(segment, "avg_logprob"):
                     confidences.append(segment.avg_logprob)
-        
+
         # Apply confidence filtering if we have confidence data (like your original)
         if confidences:
             avg_log_prob = sum(confidences) / len(confidences)
-            
+
             # General confidence threshold (same as your original)
             confidence_threshold = -1.5
             if avg_log_prob < confidence_threshold:
                 logger.debug("[%s] Low confidence transcription rejected (%.2f): '%s'",
-                           transcription_id, avg_log_prob, transcribed_text)
+                             transcription_id, avg_log_prob, transcribed_text)
                 return False, avg_log_prob
-            
+
             # CRITICAL RESTORATION: Special case for common hallucinations (same as original)
             text = transcribed_text.strip().lower()
-            text_clean = text.translate(str.maketrans('', '', string.punctuation))
-            
+            text_clean = text.translate(
+                str.maketrans('', '', string.punctuation))
+
             if len(text_clean) < 15 and text_clean in COMMON_HALLUCINATIONS:
                 # For these common short responses, require higher confidence (same as original)
                 stricter_threshold = -0.5
                 if avg_log_prob < stricter_threshold:
                     logger.debug("[%s] Short hallucination '%s' rejected with confidence %.2f",
-                               transcription_id, text, avg_log_prob)
+                                 transcription_id, text, avg_log_prob)
                     return False, avg_log_prob
-            
+
             logger.debug("[%s] Transcription confidence: %.2f, passed filtering",
-                        transcription_id, avg_log_prob)
+                         transcription_id, avg_log_prob)
             return True, avg_log_prob
         else:
             # No confidence data available - this shouldn't happen with proper Whisper results
             logger.warning("[%s] No confidence data available from segments - result type: %s",
-                          transcription_id, type(result).__name__)
-            
+                           transcription_id, type(result).__name__)
+
             # Try to get confidence from result object directly as fallback
             if hasattr(result, 'avg_logprob'):
                 confidence = getattr(result, 'avg_logprob', 0.0)
-                logger.debug("[%s] Using result-level confidence: %.2f", transcription_id, confidence)
+                logger.debug(
+                    "[%s] Using result-level confidence: %.2f", transcription_id, confidence)
                 return confidence >= -1.5, confidence
-            
+
             # Basic text quality filtering as last resort
             if not transcribed_text or len(transcribed_text.strip()) < 2:
                 return False, 0.0
-            
+
             # Check for obvious hallucinations without confidence
             text_clean = transcribed_text.strip().lower().translate(
                 str.maketrans('', '', string.punctuation))
-            
+
             if len(text_clean) < 10 and text_clean in COMMON_HALLUCINATIONS:
                 logger.debug("[%s] Short hallucination '%s' filtered without confidence data",
-                           transcription_id, text_clean)
+                             transcription_id, text_clean)
                 return False, 0.0
-            
-            logger.warning("[%s] No confidence data - accepting by default", transcription_id)
+
+            logger.warning(
+                "[%s] No confidence data - accepting by default", transcription_id)
             return True, 0.0  # Default to accepting if no confidence data
-            
+
     except Exception as e:
         logger.error("Error in confidence filtering: %s", str(e))
         return True, 0.0  # Default to accepting on error

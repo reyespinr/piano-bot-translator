@@ -36,7 +36,11 @@ MODEL_USAGE_STATS = {
     "fast_models_busy": False,
     "accurate_model_lock": threading.RLock(),
     "fast_model_locks": [],
-    "fast_model_usage": []
+    "fast_model_usage": [],
+    # CRITICAL FIX: Add missing usage tracking counters
+    "fast_uses": 0,
+    "accurate_uses": 0,
+    "queue_overflows": 0
 }
 
 

@@ -647,8 +647,7 @@ class RealTimeWaveSink(WaveSink):
         if self.session.state == "new":
             return 0.3  # 300ms for new sessions
         elif self.session.state == "active":
-            return 0.2  # 200ms for active sessions
-        else:  # established
+            return 0.2  # 200ms for active sessions        else:  # established
             # 150ms for established sessions
             return 0.15
 

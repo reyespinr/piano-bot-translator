@@ -106,10 +106,9 @@ def get_available_fast_model():
                          len(available_models) - 1,
                          MODEL_FAST_POOL_SIZE)
 
+            # All models busy, return first model (will wait for lock)
             return MODEL_FAST_POOL[model_index], MODEL_USAGE_STATS["fast_model_locks"][model_index], model_index
-
-    # All models busy, return first model (will wait for lock)
-    logger.debug("⚠️ All fast models busy, waiting for model 1...")
+    logger.info("⚠️ All fast models busy, waiting for model 1...")
     return MODEL_FAST_POOL[0], MODEL_USAGE_STATS["fast_model_locks"][0], 0
 
 
@@ -302,16 +301,15 @@ def select_fast_model():
                 MODEL_USAGE_STATS["fast_model_usage"]) if usage == min_usage]
 
             # Select the first available model with minimum usage
-            selected_index = available_models[0]
-
             # Increment usage count
+            selected_index = available_models[0]
             MODEL_USAGE_STATS["fast_model_usage"][selected_index] += 1
 
-            logger.debug("🎯 Selected fast model %d (usage: %d, available: %d/%d)",
-                         selected_index + 1,
-                         MODEL_USAGE_STATS["fast_model_usage"][selected_index],
-                         len(available_models) - 1,
-                         len(MODEL_USAGE_STATS["fast_model_usage"]))
+            logger.info("🎯 Selected fast model %d (usage: %d, available: %d/%d)",
+                        selected_index + 1,
+                        MODEL_USAGE_STATS["fast_model_usage"][selected_index],
+                        len(available_models) - 1,
+                        len(MODEL_USAGE_STATS["fast_model_usage"]))
 
             return selected_index
 

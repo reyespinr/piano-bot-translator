@@ -3,6 +3,7 @@ py-cord==2.6.1
 PyNaCl==1.4.0
 
 # Machine learning and transcription - compatible versions
+--extra-index-url https://download.pytorch.org/whl/cu118
 torch==2.0.1+cu118
 torchaudio==2.0.2+cu118
 stable-ts==2.19.0

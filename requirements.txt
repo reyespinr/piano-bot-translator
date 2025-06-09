@@ -1,14 +1,16 @@
 # Core Discord and voice processing
-py-cord==2.4.1  # Replace with your required version
+py-cord==2.6.1
 PyNaCl==1.4.0
 
-# Machine learning and transcription
-# Note: stable-ts automatically installs: openai-whisper, torch, torchaudio, numpy, numba
+# Machine learning and transcription - compatible versions
+torch==2.0.1+cu118
+torchaudio==2.0.2+cu118
 stable-ts==2.19.0
 
 # Web framework and API
-fastapi
-uvicorn
+fastapi==0.115.12
+uvicorn[standard]
+websockets==15.0.1
 
 # HTTP requests for DeepL API
 requests==2.32.3

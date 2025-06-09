@@ -336,11 +336,10 @@ class RealTimeWaveSink(WaveSink):
             if user_state.last_packet_time == 0:
                 logger.debug("First audio packet from user %s", user)
                 user_state.last_packet_time = current_time
+                # PROTECTION: Validate audio data for activity detection using combined VAD
                 user_state.last_active_time = current_time
-
-            # PROTECTION: Validate audio data for activity detection
             try:
-                is_active = self.is_audio_active(data, user)
+                is_active = self._should_process_audio(data, user)
             except (ValueError, TypeError, OverflowError) as e:
                 logger.debug(
                     "Audio activity detection failed for user %s: %s", user, str(e))
@@ -435,14 +434,36 @@ class RealTimeWaveSink(WaveSink):
         except (ValueError, TypeError, OverflowError, MemoryError) as e:
             logger.warning(
                 "Audio activity detection error for user %s: %s", user, str(e))
-            return False  # Default to inactive for corrupted audio
+            # Default to inactive for corrupted audio
+            return False
 
     def _update_pre_speech_buffer(self, user, data):
         """Update the pre-speech buffer for smoother speech beginning."""
         user_state = self._get_user_state(user)
-        user_state.pre_speech_buffer.append(data)
-        if len(user_state.pre_speech_buffer) > 10:  # Keep ~200ms of audio
-            user_state.pre_speech_buffer.pop(0)
+
+        # CRITICAL FIX: Only keep pre-speech buffer if recent activity detected
+        # Check if this frame has any energy to avoid accumulating silence
+        try:
+            # Quick energy check on current frame
+            audio_array = np.frombuffer(data, dtype=np.int16)
+            frame_energy = np.mean(np.abs(audio_array)) if len(
+                audio_array) > 0 else 0
+
+            # Only add to pre-speech buffer if there's some energy OR we're already speaking
+            if frame_energy > 100 or user_state.is_speaking:
+                user_state.pre_speech_buffer.append(data)
+                if len(user_state.pre_speech_buffer) > 5:  # Reduced from 10 to 5 frames (~100ms)
+                    user_state.pre_speech_buffer.pop(0)
+            else:
+                # Clear pre-speech buffer during silence to prevent accumulation
+                if len(user_state.pre_speech_buffer) > 0:
+                    user_state.pre_speech_buffer = []
+
+        except (ValueError, TypeError) as e:
+            # Fallback: just maintain buffer size
+            user_state.pre_speech_buffer.append(data)
+            if len(user_state.pre_speech_buffer) > 5:
+                user_state.pre_speech_buffer.pop(0)
 
     def _process_silent_speech(self, user):
         """Process speech after detecting significant silence."""
@@ -453,7 +474,7 @@ class RealTimeWaveSink(WaveSink):
         self.process_speech_buffer(user)
         user_state.speech_detected = False
         user_state.silence_frames = 0
-        user_state.speech_buffer = io.BytesIO()
+        # Buffer is now reset immediately in _create_and_queue_audio_file
 
     def _handle_long_pause(self, user):
         """Handle a long pause in audio packets."""
@@ -466,9 +487,7 @@ class RealTimeWaveSink(WaveSink):
         if user_state.is_speaking and user_state.speech_detected:
             logger.debug(
                 "Processing speech before resetting for user %s", user)
-            self.process_speech_buffer(user)
-
-        # Reset state
+            self.process_speech_buffer(user)        # Reset state
         user_state.is_speaking = False
         user_state.silence_frames = 0
         user_state.speech_detected = False
@@ -481,16 +500,24 @@ class RealTimeWaveSink(WaveSink):
 
         # Reset silence counter when speech is detected
         user_state.silence_frames = 0
-
         # Mark that speech was detected in this session
-        # If this is the start of speech, add pre-speech buffer first
         user_state.speech_detected = True
+
+        # If this is the start of speech, reset buffer and add pre-speech buffer
         if not user_state.is_speaking:
             logger.debug("Speech started for user %s", user)
             user_state.is_speaking = True
-            # Add pre-speech frames for smoother beginning
-            for pre_data in user_state.pre_speech_buffer:
-                user_state.speech_buffer.write(pre_data)
+
+            # CRITICAL FIX: Reset speech buffer to prevent accumulation of previous silence
+            user_state.speech_buffer = io.BytesIO()
+
+            # Add pre-speech frames for smoother beginning, but limit to avoid silence accumulation
+            pre_speech_count = len(user_state.pre_speech_buffer)
+            if pre_speech_count > 0:
+                logger.debug(
+                    "Adding %d pre-speech frames for user %s", pre_speech_count, user)
+                for pre_data in user_state.pre_speech_buffer:
+                    user_state.speech_buffer.write(pre_data)
 
         # Add this audio data to the speech buffer
         try:
@@ -512,13 +539,11 @@ class RealTimeWaveSink(WaveSink):
                     "Failed to write silence data for user %s: %s", user, str(e))
 
         # Increment silence counter
-        user_state.silence_frames += 1
-
         # CRITICAL FIX: Only process speech once when threshold is first exceeded
+        user_state.silence_frames += 1
         if (user_state.is_speaking and
             user_state.silence_frames == self.config.silence_threshold + 1 and  # Only trigger once
                 user_state.speech_detected):  # Only if speech was actually detected
-
             logger.debug("Speech ended for user %s. Processing audio.", user)
             self.process_speech_buffer(user)
 
@@ -526,7 +551,7 @@ class RealTimeWaveSink(WaveSink):
             user_state.is_speaking = False
             user_state.speech_detected = False
             user_state.silence_frames = 0
-            user_state.speech_buffer = io.BytesIO()
+            # Buffer is now reset immediately in _create_and_queue_audio_file
 
     def process_speech_buffer(self, user):
         """Process the speech buffer for a user and queue for transcription."""
@@ -547,9 +572,7 @@ class RealTimeWaveSink(WaveSink):
             logger.debug("Speech too short (%.2fs < %.2fs)" +
                          " or buffer too small (%d < %d bytes), skipping.",
                          duration_seconds, min_duration, buffer_size, min_buffer_size)
-            return
-
-        # IMPROVED: Reduce cooldown for better responsiveness
+            return        # IMPROVED: Reduce cooldown for better responsiveness
         if user_state.last_processed_time > 0:
             time_since_last = current_time - user_state.last_processed_time
             if time_since_last < 1.5:
@@ -568,6 +591,9 @@ class RealTimeWaveSink(WaveSink):
             # Write audio buffer to file
             user_state.speech_buffer.seek(0)
             audio_data = user_state.speech_buffer.read()
+
+            # CRITICAL FIX: Reset buffer immediately after reading to prevent accumulation
+            user_state.speech_buffer = io.BytesIO()
 
             with wave.open(audio_filename, 'wb') as wav_file:
                 wav_file.setnchannels(2)  # Discord uses stereo
@@ -959,9 +985,8 @@ class RealTimeWaveSink(WaveSink):
 
                         # Add rate limiting per user to prevent repeated processing
                         if not hasattr(user_state, 'last_inactive_check'):
+                            # Only process if we haven't checked this user recently
                             user_state.last_inactive_check = 0
-
-                        # Only process if we haven't checked this user recently
                         if current_time - user_state.last_inactive_check > 2.0:
                             logger.debug(
                                 "Timer detected inactive speaker %s. Processing speech.", user)
@@ -969,7 +994,7 @@ class RealTimeWaveSink(WaveSink):
                             user_state.is_speaking = False
                             user_state.speech_detected = False
                             user_state.silence_frames = 0
-                            user_state.speech_buffer = io.BytesIO()
+                            # Buffer is now reset immediately in _create_and_queue_audio_file
                             user_state.last_inactive_check = current_time
 
                 except Exception as user_error:
@@ -1099,7 +1124,7 @@ class RealTimeWaveSink(WaveSink):
                 if duration < 0.1:  # Less than 100ms
                     return False, f"Audio too short: {duration:.2f}s"
 
-                if duration > 30.0:  # More than 30 seconds
+                if duration > 300.0:  # More than 5 minutes (300 seconds)
                     return False, f"Audio too long: {duration:.2f}s"
 
             return True, "Valid"
@@ -1108,3 +1133,109 @@ class RealTimeWaveSink(WaveSink):
             return False, f"Wave format error: {str(e)}"
         except Exception as e:
             return False, f"Validation error: {str(e)}"
+
+    def _is_user_speaking_discord_vad(self, user):
+        """Check if user is speaking according to Discord's built-in VAD.
+
+        This uses Discord's own voice activity detection which is more accurate
+        than energy-based detection as it accounts for things like:
+        - Push-to-talk state
+        - Voice activation detection
+        - Mute/deafen states
+        - Network conditions
+        """
+        try:
+            # Access voice client through parent (VoiceTranslator instance)
+            if (hasattr(self, 'parent') and self.parent and
+                hasattr(self.parent, 'voice_client') and self.parent.voice_client and
+                    hasattr(self.parent.voice_client, 'ws') and self.parent.voice_client.ws):
+
+                voice_client = self.parent.voice_client
+                ssrc_map = voice_client.ws.ssrc_map                # Find the SSRC for this user
+                for info in ssrc_map.values():
+                    if info.get("user_id") == user:
+                        speaking_state = info.get("speaking", False)
+                        logger.debug(
+                            "Discord VAD for user %s: speaking=%s", user, speaking_state)
+                        return speaking_state
+
+                logger.debug("User %s not found in SSRC map", user)
+                return False
+
+        except Exception as e:
+            logger.warning(
+                "Error checking Discord VAD for user %s: %s", user, e)
+            return False
+
+        return False
+
+    def _should_process_audio(self, data, user):
+        """Combined VAD check using both Discord's VAD and energy-based fallback.
+
+        This provides the most reliable voice activity detection by:
+        1. First checking Discord's built-in VAD (most accurate)
+        2. Falling back to energy-based VAD if Discord VAD unavailable
+        3. Applying additional logic for silence detection
+        """
+        try:
+            # Method 1: Try Discord's built-in VAD first (most reliable)
+            discord_speaking = self._is_user_speaking_discord_vad(user)
+
+            # Method 2: Energy-based VAD as fallback
+            energy_active = self.is_audio_active(data, user)
+
+            # Method 3: Check for silence frames
+            # DEBUG: Log VAD decisions for troubleshooting (only when there's activity)
+            is_silence_frame = self._is_silence_frame(data)
+            if energy_active or discord_speaking:
+                logger.debug("VAD check for user %s: discord=%s, energy=%s, silence=%s",
+                             user, discord_speaking, energy_active, is_silence_frame)
+
+            # Combine the signals for best accuracy
+            if discord_speaking is not None:
+                # If Discord says they're speaking, trust it
+                if discord_speaking:
+                    return True                # FIXED: Be more conservative when Discord says NOT speaking
+                # Only override Discord's decision if energy is VERY high and it's clearly not silence
+                elif energy_active and not is_silence_frame:
+                    # Calculate actual energy to be more selective
+                    try:
+                        audio_array = np.frombuffer(data, dtype=np.int16)
+                        if len(audio_array) > 0:
+                            current_energy = np.mean(np.abs(audio_array))
+                            # Only override if energy is significantly higher than normal speech threshold
+                            if current_energy > 800:  # Much higher threshold than normal 250
+                                logger.debug(
+                                    "Overriding Discord VAD: very high energy %d detected", current_energy)
+                                return True
+                    except Exception:
+                        pass
+                # Trust Discord when it says user is not speaking
+                return False
+            else:
+                # Fallback to energy-based VAD if Discord VAD unavailable
+                return energy_active and not is_silence_frame
+        except Exception as e:
+            logger.warning(
+                "Error in combined VAD check for user %s: %s", user, e)
+            # Final fallback to simple energy check
+            return self.is_audio_active(data, user)
+
+    def _is_silence_frame(self, audio_data):
+        """Check if audio frame is a silence frame sent by Discord."""
+        try:
+            # Discord sends specific silence frames: b"\xf8\xff\xfe"
+            if len(audio_data) >= 3 and audio_data[:3] == b"\xf8\xff\xfe":
+                return True
+
+            # Also check for very low energy (near silence)
+            if len(audio_data) >= 2:
+                audio_array = np.frombuffer(audio_data, dtype=np.int16)
+                if len(audio_array) > 0:
+                    energy = np.mean(np.abs(audio_array))
+                    return energy < 50  # Very low energy threshold for silence
+
+        except Exception as e:
+            logger.debug("Error checking silence frame: %s", e)
+
+        return False

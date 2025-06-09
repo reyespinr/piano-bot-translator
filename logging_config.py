@@ -213,8 +213,8 @@ def setup_logging():
 
     for module in app_modules:
         logger = logging.getLogger(module)
-        logger.setLevel(logging.DEBUG)
-        # logger.setLevel(logging.INFO)
+        # logger.setLevel(logging.DEBUG)
+        logger.setLevel(logging.INFO)
 
     # Suppress specific third-party loggers
     logging.getLogger('urllib3').setLevel(logging.WARNING)

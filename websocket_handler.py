@@ -176,10 +176,10 @@ class WebSocketManager:
                 connected_users = self.bot_manager.get_connected_users()
 
                 # CRITICAL FIX: Debug logging to see what we're getting
-                logger.info(
+                logger.debug(
                     "🔍 DEBUG: Connected users from bot_manager: %s", connected_users)
-                logger.info("🔍 DEBUG: Bot manager user_processing_enabled: %s",
-                            self.bot_manager.user_processing_enabled)
+                logger.debug("🔍 DEBUG: Bot manager user_processing_enabled: %s",
+                             self.bot_manager.user_processing_enabled)
 
                 # Sync user processing states
                 self.user_processing_enabled = self.bot_manager.user_processing_enabled.copy()
@@ -220,8 +220,8 @@ class WebSocketManager:
 
                 logger.info("📡 Broadcasting status update: %d users, %d enabled states",
                             len(connected_users), len(self.user_processing_enabled))
-                logger.info("🔍 DEBUG: Final status message users: %s",
-                            status_message["users"])
+                logger.debug("🔍 DEBUG: Final status message users: %s",
+                             status_message["users"])
                 await self.broadcast_message(status_message)
 
         except Exception as e:

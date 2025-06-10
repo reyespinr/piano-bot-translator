@@ -215,7 +215,6 @@ def determine_model_routing(audio_file, current_queue_size=0, entry_stats=None):
     """
     try:
         # Calculate audio duration from file size (approximate)
-        import os
         file_size = os.path.getsize(audio_file)
         # Rough estimation: 48kHz * 2 channels * 2 bytes = 192KB per second
         duration_seconds = file_size / 192000.0

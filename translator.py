@@ -9,11 +9,9 @@ import asyncio
 import os
 import traceback
 import struct
-import time
 import sys
 import gc
 import subprocess
-import utils
 import translation
 from typing import Callable
 from custom_sink import RealTimeWaveSink
@@ -525,7 +523,6 @@ class VoiceTranslator:
                 await self.translation_callback(user_id, transcribed_text, message_type="transcription")
 
                 # Determine if translation is needed
-                import translation
                 needs_translation = await translation.should_translate(transcribed_text, detected_language)
 
                 if needs_translation:

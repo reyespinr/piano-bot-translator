@@ -43,15 +43,14 @@ async def safe_warmup_transcribe(audio_file, model, model_name, model_index=None
                 "Warmup transcription completed for %s model", model_display_name)
             return result is not None
 
-        else:
-            # Accurate model warmup - use normal transcribe_with_model
-            transcribed_text, detected_language, result = await transcription.transcribe_with_model(
-                audio_file, model, model_name, model_index
-            )
+        # Accurate model warmup - use normal transcribe_with_model
+        transcribed_text, detected_language, result = await transcription.transcribe_with_model(
+            audio_file, model, model_name, model_index
+        )
 
-            logger.debug(
-                "Warmup transcription completed for %s model", model_name.upper())
-            return result is not None
+        logger.debug(
+            "Warmup transcription completed for %s model", str(model_name).upper())
+        return result is not None
 
     except asyncio.TimeoutError:
         logger.warning("Warmup transcription timed out for %s model - continuing anyway",

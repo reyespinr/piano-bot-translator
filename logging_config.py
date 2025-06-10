@@ -2,8 +2,9 @@
 Centralized logging configuration for the Discord Voice Translator.
 
 This module sets up comprehensive logging with:
+- YAML-based configuration for easy customization
 - File logging with rotation for persistent storage
-- Console logging for real-time monitoring  
+- Console logging with configurable level (DEBUG/INFO)
 - Proper filtering to control Discord.py verbosity
 - Color formatting for better readability
 - Performance optimizations for high-frequency operations
@@ -11,15 +12,16 @@ This module sets up comprehensive logging with:
 import logging
 import logging.handlers
 import sys
-import os
 from datetime import datetime
 from pathlib import Path
+from typing import Dict, Any, Optional
 
-# Color codes for console output
+import yaml
 
 
 class Colors:
     """ANSI color codes for console output formatting."""
+
     GREY = '\033[90m'
     BLUE = '\033[94m'
     GREEN = '\033[92m'
@@ -32,7 +34,12 @@ class Colors:
 class ColoredFormatter(logging.Formatter):
     """Custom formatter that adds color codes to log messages for console output."""
 
-    def __init__(self, fmt=None):
+    def __init__(self, fmt: Optional[str] = None) -> None:
+        """Initialize the colored formatter.
+
+        Args:
+            fmt: Format string for log messages
+        """
         super().__init__()
         self.fmt = fmt or "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
@@ -45,9 +52,15 @@ class ColoredFormatter(logging.Formatter):
             logging.CRITICAL: Colors.BOLD_RED
         }
 
-    def format(self, record):
-        """Format log record with appropriate color coding."""
-        # Create a copy of the record to avoid modifying the original
+    def format(self, record: logging.LogRecord) -> str:
+        """Format log record with appropriate color coding.
+
+        Args:
+            record: Log record to format
+
+        Returns:
+            Formatted log message with color codes
+        """
         log_color = self.COLORS.get(record.levelno, Colors.RESET)
 
         # Apply color to the entire message
@@ -62,12 +75,24 @@ class ColoredFormatter(logging.Formatter):
 class DiscordFilter(logging.Filter):
     """Filter to control Discord.py logging verbosity."""
 
-    def __init__(self, max_level=logging.WARNING):
+    def __init__(self, max_level: int = logging.WARNING) -> None:
+        """Initialize the Discord filter.
+
+        Args:
+            max_level: Maximum log level to allow for Discord logs
+        """
         super().__init__()
         self.max_level = max_level
 
-    def filter(self, record):
-        """Filter Discord logs based on logger name and level."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Filter Discord logs based on logger name and level.
+
+        Args:
+            record: Log record to filter
+
+        Returns:
+            True if record should be logged, False otherwise
+        """
         # Allow all non-Discord logs
         if not record.name.startswith('discord'):
             return True
@@ -76,19 +101,18 @@ class DiscordFilter(logging.Filter):
         return record.levelno >= self.max_level
 
 
-class AppFilter(logging.Filter):
-    """Filter to only allow application logs (non-Discord)."""
-
-    def filter(self, record):
-        """Only allow non-Discord logs."""
-        return not record.name.startswith('discord')
-
-
 class UvicornFilter(logging.Filter):
     """Filter to allow application logs and uvicorn, but block Discord."""
 
-    def filter(self, record):
-        """Allow non-Discord logs and uvicorn logs."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Allow non-Discord logs and uvicorn logs.
+
+        Args:
+            record: Log record to filter
+
+        Returns:
+            True if record should be logged, False otherwise
+        """
         # Block Discord logs
         if record.name.startswith('discord'):
             return False
@@ -96,31 +120,99 @@ class UvicornFilter(logging.Filter):
         return True
 
 
+class NumbaFilter(logging.Filter):
+    """Filter to suppress numba debug messages."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Suppress all numba debug messages.
+
+        Args:
+            record: Log record to filter
+
+        Returns:
+            True if record should be logged, False otherwise
+        """
+        # Suppress all numba debug messages
+        if record.name.startswith('numba'):
+            return record.levelno >= logging.WARNING
+        return True
+
+
+# Constants
+CONFIG_FILE_PATH = Path("config.yaml")
+LOG_DIR = Path("logs")
+DEFAULT_CONFIG = {
+    'logging': {
+        'console_level': 'INFO',
+        'file_level': 'DEBUG',
+        'max_file_size': 10,
+        'backup_count': 4
+    }
+}
+
 # Global variable to store the log file path
-log_file_path = None
+log_file_path: Optional[str] = None
 
 
-def setup_logging():
+def load_config() -> Dict[str, Any]:
+    """Load configuration from YAML file.
+
+    Returns:
+        Configuration dictionary with defaults if file doesn't exist
     """
-    Set up comprehensive logging configuration.
+    try:
+        if CONFIG_FILE_PATH.exists():
+            with open(CONFIG_FILE_PATH, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+                # Merge with defaults to ensure all keys exist
+                if 'logging' not in config:
+                    config['logging'] = DEFAULT_CONFIG['logging']
+                else:
+                    for key, value in DEFAULT_CONFIG['logging'].items():
+                        if key not in config['logging']:
+                            config['logging'][key] = value
+                return config
+        else:
+            # Create default config file
+            with open(CONFIG_FILE_PATH, 'w', encoding='utf-8') as f:
+                yaml.dump(DEFAULT_CONFIG, f,
+                          default_flow_style=False, sort_keys=False)
+            return DEFAULT_CONFIG
+    except Exception as e:
+        print(f"Warning: Could not load config.yaml, using defaults: {e}")
+        return DEFAULT_CONFIG
+
+
+def setup_logging() -> str:
+    """Set up comprehensive logging configuration.
 
     Creates:
-    - File handler with rotation for all application logs
-    - Console handler with color formatting and Discord filtering
+    - File handler with rotation for all application logs (always DEBUG)
+    - Console handler with configurable level (DEBUG or INFO based on config)
     - Proper formatters and filters for each handler
 
     Returns:
-        str: Path to the log file
+        Path to the log file
     """
     global log_file_path
 
+    # Load configuration
+    config = load_config()
+    logging_config = config['logging']
+
+    # Parse console level from config
+    console_level_str = logging_config.get('console_level', 'INFO').upper()
+    console_level = getattr(logging, console_level_str, logging.INFO)
+
+    # File level is always DEBUG
+    file_level = logging.DEBUG
+
     # Create logs directory if it doesn't exist
-    logs_dir = Path("logs")
-    logs_dir.mkdir(exist_ok=True)
+    LOG_DIR.mkdir(exist_ok=True)
 
     # Generate log filename with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_filename = logs_dir / f"discord_translator_{timestamp}.log"
+    log_filename = LOG_DIR / f"discord_translator_{timestamp}.log"
 
     # Store globally for later access
     log_file_path = str(log_filename)
@@ -133,14 +225,18 @@ def setup_logging():
     root_logger.setLevel(logging.DEBUG)
 
     # === FILE HANDLER SETUP ===
-    # Create rotating file handler (10MB max, 5 backups)
+    # Create rotating file handler with config values
+    max_bytes = logging_config.get(
+        'max_file_size', 10) * 1024 * 1024  # Convert MB to bytes
+    backup_count = logging_config.get('backup_count', 4)
+
     file_handler = logging.handlers.RotatingFileHandler(
         log_filename,
-        maxBytes=10*1024*1024,  # 10MB
-        backupCount=5,
+        maxBytes=max_bytes,
+        backupCount=backup_count,
         encoding='utf-8'
     )
-    file_handler.setLevel(logging.DEBUG)  # Capture everything in file
+    file_handler.setLevel(file_level)  # Always DEBUG for file
 
     # File formatter (no colors, more detailed)
     file_formatter = logging.Formatter(
@@ -148,34 +244,19 @@ def setup_logging():
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     file_handler.setFormatter(file_formatter)
-
-    # CHANGED: Use UvicornFilter instead of AppFilter to allow uvicorn in log file
     file_handler.addFilter(UvicornFilter())
 
     # === CONSOLE HANDLER SETUP ===
     console_handler = logging.StreamHandler(sys.stdout)
-    # Will be filtered by DiscordFilter
-    console_handler.setLevel(logging.DEBUG)
+    console_handler.setLevel(console_level)  # Use configured level
 
     # Console formatter with colors
     console_formatter = ColoredFormatter()
     console_handler.setFormatter(console_formatter)
 
-    # CHANGED: Use UvicornFilter instead of DiscordFilter to allow uvicorn on console
+    # Add filters to console handler
     console_handler.addFilter(UvicornFilter())
-
-    # Add Discord filter to console (only show WARNING+ from Discord)
-    console_handler.addFilter(DiscordFilter(
-        max_level=logging.ERROR))  # Only ERROR+ from Discord
-
-    # Create a filter to suppress numba debug messages
-    class NumbaFilter(logging.Filter):
-        def filter(self, record):
-            # Suppress all numba debug messages
-            if record.name.startswith('numba'):
-                return record.levelno >= logging.WARNING
-            return True
-
+    console_handler.addFilter(DiscordFilter(max_level=logging.ERROR))
     console_handler.addFilter(NumbaFilter())
 
     # === ADD HANDLERS TO ROOT LOGGER ===
@@ -183,83 +264,67 @@ def setup_logging():
     root_logger.addHandler(console_handler)
 
     # === CONFIGURE SPECIFIC LOGGERS ===
-
-    # Discord.py logging - reduce verbosity
-    discord_logger = logging.getLogger('discord')
-    discord_logger.setLevel(logging.ERROR)  # Only show errors from Discord
-
-    # Asyncio logging - reduce verbosity
-    asyncio_logger = logging.getLogger('asyncio')
-    asyncio_logger.setLevel(logging.ERROR)
-
-    # urllib3 logging - reduce verbosity
-    urllib3_logger = logging.getLogger('urllib3')
-    urllib3_logger.setLevel(logging.ERROR)
-
-    # Uvicorn logging - CHANGED: restore INFO level for visibility
-    uvicorn_logger = logging.getLogger('uvicorn')
-    uvicorn_logger.setLevel(logging.INFO)  # Restored from WARNING to INFO
-
-    uvicorn_access_logger = logging.getLogger('uvicorn.access')
-    # Restored from WARNING to INFO
-    uvicorn_access_logger.setLevel(logging.INFO)
-
-    # Our application modules - keep at DEBUG
-    app_modules = [
-        'server', 'bot_manager', 'translator', 'utils', 'custom_sink',
-        'transcription', 'translation', 'models', 'audio_utils',
-        'websocket_handler', '__main__'
-    ]
-
-    for module in app_modules:
-        logger = logging.getLogger(module)
-        # logger.setLevel(logging.DEBUG)
-        logger.setLevel(logging.INFO)
-
-    # Suppress specific third-party loggers
-    logging.getLogger('urllib3').setLevel(logging.WARNING)
-    logging.getLogger('websockets').setLevel(logging.WARNING)
-    logging.getLogger('aiohttp').setLevel(logging.WARNING)
-
-    # Suppress numba compilation messages completely
-    logging.getLogger('numba').setLevel(logging.WARNING)
-    logging.getLogger('numba.core').setLevel(logging.WARNING)
-    logging.getLogger('numba.core.byteflow').setLevel(logging.ERROR)
-    logging.getLogger('numba.core.ssa').setLevel(logging.ERROR)
-    logging.getLogger('numba.core.interpreter').setLevel(logging.ERROR)
-
-    # Suppress torio debug messages
-    logging.getLogger('torio').setLevel(logging.WARNING)
-    logging.getLogger('torio._extension').setLevel(logging.WARNING)
-    logging.getLogger('torio._extension.utils').setLevel(logging.WARNING)
+    _configure_third_party_loggers()
 
     # === LOG STARTUP INFORMATION ===
     startup_logger = logging.getLogger('logging_setup')
     startup_logger.info("🎹 Discord Bot Translator - Logging initialized")
     startup_logger.info("📁 Log file: %s", log_filename)
-    startup_logger.info(
-        "📊 Console level: DEBUG (Discord filtered, Uvicorn visible), File level: DEBUG (App+Uvicorn)")
+    startup_logger.info("📊 Console level: %s, File level: %s",
+                        console_level_str, "DEBUG")
+    startup_logger.info("🔧 Configuration loaded from config.yaml")
     startup_logger.info("🔧 Root logger handlers: %d",
                         len(root_logger.handlers))
 
     return str(log_filename)
 
 
-def get_logger(name):
-    """
-    Get a logger instance for the specified module.
+def _configure_third_party_loggers() -> None:
+    """Configure third-party library loggers to reduce verbosity."""
+    # Discord.py logging - reduce verbosity
+    logging.getLogger('discord').setLevel(logging.ERROR)
+
+    # Asyncio logging - reduce verbosity
+    logging.getLogger('asyncio').setLevel(logging.ERROR)
+
+    # HTTP and networking libraries
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
+    logging.getLogger('websockets').setLevel(logging.WARNING)
+    logging.getLogger('aiohttp').setLevel(logging.WARNING)
+
+    # Uvicorn logging
+    logging.getLogger('uvicorn').setLevel(logging.INFO)
+    logging.getLogger('uvicorn.access').setLevel(logging.INFO)
+
+    # Suppress numba compilation messages
+    numba_loggers = [
+        'numba', 'numba.core', 'numba.core.byteflow',
+        'numba.core.ssa', 'numba.core.interpreter'
+    ]
+    for logger_name in numba_loggers:
+        level = logging.ERROR if 'byteflow' in logger_name or 'ssa' in logger_name or 'interpreter' in logger_name else logging.WARNING
+        logging.getLogger(logger_name).setLevel(level)
+
+    # Suppress torio debug messages
+    torio_loggers = ['torio', 'torio._extension', 'torio._extension.utils']
+    for logger_name in torio_loggers:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+
+def get_logger(name: str) -> logging.Logger:
+    """Get a logger instance for the specified module.
 
     Args:
-        name (str): Name of the module requesting the logger
+        name: Name of the module requesting the logger
 
     Returns:
-        logging.Logger: Configured logger instance
+        Configured logger instance
     """
     return logging.getLogger(name)
 
 
-# Test logging functionality if run directly
-if __name__ == "__main__":
+def _run_logging_tests() -> None:
+    """Run logging tests when module is executed directly."""
     # Set up logging
     log_file = setup_logging()
 
@@ -279,11 +344,24 @@ if __name__ == "__main__":
 
     print(f"\n✅ Logging test complete. Check log file: {log_file}")
 
-# CRITICAL: Initialize logging immediately when this module is imported
-if log_file_path is None:
-    try:
-        setup_logging()
-    except Exception as e:
-        print(f"Failed to initialize logging: {e}")
-        # Create a basic logger as fallback
-        logging.basicConfig(level=logging.INFO)
+
+# Initialize logging when module is imported
+def _initialize_logging() -> None:
+    """Initialize logging configuration on module import."""
+    global log_file_path
+
+    if log_file_path is None:
+        try:
+            setup_logging()
+        except Exception as e:
+            print(f"Failed to initialize logging: {e}")
+            # Create a basic logger as fallback
+            logging.basicConfig(level=logging.INFO)
+
+
+# Test logging functionality if run directly
+if __name__ == "__main__":
+    _run_logging_tests()
+else:
+    # Initialize logging when imported
+    _initialize_logging()

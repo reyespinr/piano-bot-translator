@@ -4,7 +4,6 @@ Audio processing utilities for Discord voice transcription.
 This module provides audio file processing, validation, and creation utilities
 for handling Discord voice data and preparing it for transcription.
 """
-import os
 import wave
 import numpy as np
 from logging_config import get_logger
@@ -72,7 +71,7 @@ def create_dummy_audio_file(filename="warmup_audio.wav"):
         audio_data = np.column_stack((audio_data, audio_data))
 
     # Write to WAV file
-    with wave.Wave_write(filename) as wf:
+    with wave.open(filename, 'wb') as wf:
         wf.setnchannels(channels)
         wf.setsampwidth(2)  # 16-bit
         wf.setframerate(sample_rate)

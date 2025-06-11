@@ -3,6 +3,7 @@ Core transcription functionality using Whisper models.
 
 This module handles the actual transcription of audio files using the loaded
 Whisper models, with intelligent routing between accurate and fast models.
+Now uses the unified ModelManager for better organization.
 """
 import asyncio
 import gc
@@ -13,7 +14,8 @@ import time
 import traceback
 import uuid
 import torch
-import models
+from model_manager import model_manager
+import models  # For backward compatibility
 import audio_utils
 from audio_utils import COMMON_HALLUCINATIONS
 from logging_config import get_logger
@@ -42,24 +44,48 @@ async def transcribe(audio_file, current_queue_size=0, concurrent_requests=0, ac
                  transcription_id, audio_file)
 
     try:
-        # Load models
+        # Load models using the new model manager
         logger.debug("🔧 [%s] Loading models...", transcription_id)
+
+        # Check if models are loaded, if not, initialize them
+        if not model_manager.stats["models_loaded"]:
+            logger.warning(
+                "[%s] Models not loaded! Initializing...", transcription_id)
+            success = await model_manager.initialize_models(warm_up=False)
+            if not success:
+                logger.error("[%s] Failed to initialize models!",
+                             transcription_id)
+                return "", "error"
+
+        # Get models from model manager
+        model_accurate, model_fast_pool = model_manager.get_models()
+
         # Determine model routing based on audio characteristics and system load
-        model_accurate, model_fast_pool = models.load_models_if_needed()
         use_fast = should_use_fast_model(
             audio_file, current_queue_size, concurrent_requests, active_transcriptions)
 
         if use_fast:
             logger.info("🚀 [%s] Using FAST model...", transcription_id)
-            selected_model_index = models.select_fast_model()
-            transcribed_text, detected_language, result = await transcribe_with_model(
-                audio_file, model_fast_pool[selected_model_index], "fast", selected_model_index
-            )
+            fast_model, fast_lock, selected_model_index = model_manager.select_fast_model()
+            if fast_model is None:
+                logger.warning(
+                    "[%s] No fast models available, falling back to accurate", transcription_id)
+                model_accurate, accurate_lock = model_manager.get_accurate_model()
+                transcribed_text, detected_language, result = await transcribe_with_model(
+                    audio_file, model_accurate, "accurate"
+                )
+            else:
+                transcribed_text, detected_language, result = await transcribe_with_model(
+                    audio_file, fast_model, "fast", selected_model_index
+                )
         else:
             logger.info("🎯 [%s] Using ACCURATE model...", transcription_id)
+            model_accurate, accurate_lock = model_manager.get_accurate_model()
             transcribed_text, detected_language, result = await transcribe_with_model(
                 audio_file, model_accurate, "accurate"
-            )        # Return the transcription results
+            )
+
+        # Return the transcription results
         logger.info("🎉 [%s] SUCCESS: text='%s', language=%s",
                     transcription_id, transcribed_text[:50] if transcribed_text else "None", detected_language)
         return transcribed_text, detected_language
@@ -76,60 +102,58 @@ def should_use_fast_model(audio_file_path, current_queue_size=0, concurrent_requ
     """Determine which model to use based on audio duration and system load"""
 
     # Get audio duration
-    duration = audio_utils.get_audio_duration_from_file(
-        audio_file_path)    # Check if accurate model is currently busy
-    accurate_busy = models.MODEL_USAGE_STATS["accurate_busy"]
+    duration = audio_utils.get_audio_duration_from_file(audio_file_path)
 
-    # Check how many fast models are available
-    available_fast_models = models.count_available_fast_models()
-
+    # Get current system state from model manager
+    stats = model_manager.get_stats()
+    accurate_busy = stats["accurate_busy"]
     # DEBUG: Add detailed logging with pool information
+    available_fast_models = stats["fast_available"]
     logger.debug("🔍 Routing decision: duration=%.1fs, accurate_busy=%s, concurrent=%d, active=%d, queue=%d, fast_available=%d/%d",
                  duration, accurate_busy, concurrent_requests, active_transcriptions, current_queue_size,
-                 available_fast_models, models.MODEL_FAST_POOL_SIZE)
+                 available_fast_models, stats["fast_models"])
 
     # AGGRESSIVE ROUTING: If accurate model is busy, route to fast models
     if accurate_busy and duration < 3.0 and available_fast_models > 0:
         logger.info("🚀 Routing audio (%.1fs) to FAST model pool (accurate model busy, %d models available)",
                     duration, available_fast_models)
-        models.MODEL_USAGE_STATS["fast_uses"] += 1
+        model_manager.update_stats(fast_uses=stats["fast_uses"] + 1)
         return True
 
     # CONCURRENT PROCESSING: If we have multiple ACTIVE transcriptions and fast models available
     if active_transcriptions >= 1 and duration < 2.0 and available_fast_models > 0:
         logger.info("⚡ Concurrent processing (%d active transcriptions), routing short audio (%.1fs) to FAST model pool (%d available)",
                     active_transcriptions, duration, available_fast_models)
-        models.MODEL_USAGE_STATS["fast_uses"] += 1
-        return True
-
-    # QUEUE-BASED ROUTING: High queue load - use fast models more aggressively
+        model_manager.update_stats(fast_uses=stats["fast_uses"] + 1)
+        return True    # QUEUE-BASED ROUTING: High queue load - use fast models more aggressively
     if current_queue_size > 2 and duration < 2.5 and available_fast_models > 0:
         logger.info("🔥 Queue load (%d), routing audio (%.1fs) to FAST model pool (%d available)",
                     current_queue_size, duration, available_fast_models)
-        models.MODEL_USAGE_STATS["fast_uses"] += 1
-        models.MODEL_USAGE_STATS["queue_overflows"] += 1
+        model_manager.update_stats(
+            fast_uses=stats["fast_uses"] + 1,
+            queue_overflows=stats["queue_overflows"] + 1
+        )
         return True
 
     # LOAD BALANCING: If we have multiple fast models available, use them more often
     if available_fast_models >= 2 and duration < 3.0:
         logger.info("⚖️ Load balancing: routing audio (%.1fs) to FAST model pool (%d models available)",
                     duration, available_fast_models)
-        models.MODEL_USAGE_STATS["fast_uses"] += 1
+        model_manager.update_stats(fast_uses=stats["fast_uses"] + 1)
         return True
 
     # EVERY 3rd SHORT CLIP: Route every 3rd short audio to fast model for load balancing
-    total_uses = models.MODEL_USAGE_STATS["accurate_uses"] + \
-        models.MODEL_USAGE_STATS["fast_uses"]
+    total_uses = stats["accurate_uses"] + stats["fast_uses"]
     if duration < 1.5 and total_uses > 0 and total_uses % 3 == 0 and available_fast_models > 0:
         logger.info(
             "⚖️ Periodic load balancing: routing short audio (%.1fs) to FAST model pool (every 3rd)", duration)
-        models.MODEL_USAGE_STATS["fast_uses"] += 1
+        model_manager.update_stats(fast_uses=stats["fast_uses"] + 1)
         return True
 
     # Default: Use accurate model for best quality
     logger.info("🎯 Routing audio (%.1fs) to ACCURATE model (concurrent: %d, active: %d, queue: %d, fast_available: %d)",
                 duration, concurrent_requests, active_transcriptions, current_queue_size, available_fast_models)
-    models.MODEL_USAGE_STATS["accurate_uses"] += 1
+    model_manager.update_stats(accurate_uses=stats["accurate_uses"] + 1)
     return False
 
 
@@ -189,19 +213,27 @@ async def transcribe_with_model(audio_file, model, model_name, model_index=None)
     """Enhanced transcribe function with comprehensive error handling and cleanup."""
     transcription_id = str(uuid.uuid4())[:8]
 
+    # Get model lock from model manager instead of legacy MODEL_USAGE_STATS
     if model_name == "fast":
         model_display_name = f"FAST-{model_index + 1}"
-        model_lock = models.MODEL_USAGE_STATS["fast_model_locks"][model_index]
+        if model_index is not None and model_index < len(model_manager.fast_tier.locks):
+            model_lock = model_manager.fast_tier.locks[model_index]
+        else:
+            logger.error("❌ [%s] Invalid fast model index: %d",
+                         transcription_id, model_index)
+            return None, None, None
     else:
         model_display_name = model_name.upper()
-        model_lock = models.MODEL_USAGE_STATS["accurate_model_lock"]
+        if model_manager.accurate_tier.locks:
+            model_lock = model_manager.accurate_tier.locks[0]
+        else:
+            logger.error(
+                "❌ [%s] No accurate model lock available", transcription_id)
+            return None, None, None
 
-    # CRITICAL FIX: Ensure active_transcriptions is always an integer
-    active_count = models.MODEL_USAGE_STATS["active_transcriptions"]
-    if isinstance(active_count, set):
-        active_count = len(active_count)
-    elif not isinstance(active_count, int):
-        active_count = 0
+    # Get current stats from model manager
+    stats = model_manager.get_stats()
+    active_count = stats["active_transcriptions"]
 
     logger.debug("🔄 [%s] Processing with %s model... (active: %d)",
                  transcription_id, model_display_name, active_count)
@@ -384,20 +416,15 @@ async def transcribe_with_model(audio_file, model, model_name, model_index=None)
         try:
             # CRITICAL FIX: Add comprehensive cleanup that ensures state is always reset
             logger.debug("🧹 [%s] %s model cleanup starting",
-                         transcription_id, model_display_name)
-
-            # CRITICAL FIX: For fast models, ensure usage stats are properly updated
+                         transcription_id, model_display_name)            # CRITICAL FIX: For fast models, ensure usage stats are properly updated via model manager
             if model_name == "fast":
                 try:
-                    with models.MODEL_USAGE_STATS["stats_lock"]:
-                        if model_index is not None and model_index < len(models.MODEL_USAGE_STATS["fast_model_usage"]):
-                            models.MODEL_USAGE_STATS["fast_model_usage"][model_index] = max(0,
-                                                                                            models.MODEL_USAGE_STATS["fast_model_usage"][model_index] - 1)
-                            logger.debug("🔢 [%s] Fast model %d usage decremented to %d",
-                                         transcription_id, model_index + 1,
-                                         models.MODEL_USAGE_STATS["fast_model_usage"][model_index])
+                    if model_index is not None:
+                        model_manager.release_fast_model(model_index)
+                        logger.debug("🔢 [%s] Fast model %d released via model manager",
+                                     transcription_id, model_index + 1)
                 except Exception as stats_error:
-                    logger.error("❌ [%s] Error updating fast model stats: %s",
+                    logger.error("❌ [%s] Error releasing fast model via model manager: %s",
                                  transcription_id, str(stats_error))
 
             # CRITICAL FIX: Force a small delay to ensure all cleanup operations complete

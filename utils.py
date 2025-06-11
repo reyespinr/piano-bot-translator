@@ -2,16 +2,15 @@
 Audio transcription and translation utilities.
 
 This module provides the main interface for transcription and translation
-functionality, coordinating between the specialized modules.
+functionality, now using the unified ModelManager for better organization.
 """
 import asyncio
 import os
 import uuid
 from logging_config import get_logger
 
-# Change relative imports to absolute imports
-import audio_utils
-import models
+# Import the new model manager
+from model_manager import model_manager
 import transcription
 import translation
 
@@ -21,16 +20,60 @@ logger = get_logger(__name__)
 transcribe = transcription.transcribe
 translate = translation.translate
 should_translate = translation.should_translate
-_load_models_if_needed = models.load_models_if_needed
 
 
+async def warm_up_pipeline():
+    """
+    Warm up transcription models using the unified ModelManager.
+    This is the new, organized way to warm up models.
+    """
+    logger.info("🔥 Starting unified model warm-up pipeline...")
+
+    try:
+        # Use the model manager's warm-up functionality
+        success = await model_manager.warm_up_models()
+
+        if success:
+            logger.info(
+                "🎯 Enhanced dual model pipeline warm-up complete! Ready for smart routing.")
+            stats = model_manager.get_stats()
+            logger.info("📈 Accurate models: %d x %s, Fast models: %d x %s",
+                        stats["accurate_models"], model_manager.accurate_config.name,
+                        stats["fast_models"], model_manager.fast_config.name)
+            logger.info("🚀 Total VRAM models loaded: %d models ready for parallel processing",
+                        stats["accurate_models"] + stats["fast_models"])
+            return True
+        else:
+            logger.warning(
+                "⚠️ Model warm-up had some issues but models should still work")
+            return False
+
+    except Exception as e:
+        logger.error("❌ Model warm-up failed: %s", str(e))
+        logger.info("🔄 Models may still work without warm-up")
+        return False
+
+
+# Backward compatibility function (deprecated)
 async def safe_warmup_transcribe(audio_file, model, model_name, model_index=None):
-    """Safe transcription for warmup with timeout and error handling."""
+    """
+    DEPRECATED: Use model_manager.warm_up_models() instead.
+    Safe transcription for warmup with timeout and error handling.
+    """
+    logger.warning(
+        "safe_warmup_transcribe() is deprecated. Use model_manager.warm_up_models() instead.")
+
     try:
         if model_name == "fast":
             model_display_name = f"FAST-{model_index + 1}"
             transcription_id = str(uuid.uuid4())[:8]
-            model_lock = models.MODEL_USAGE_STATS["fast_model_locks"][model_index]
+
+            # Get the lock from model manager
+            if model_index < len(model_manager.fast_tier.locks):
+                model_lock = model_manager.fast_tier.locks[model_index]
+            else:
+                logger.error("Invalid model index: %d", model_index)
+                return False
 
             def warmup_transcribe():
                 with model_lock:
@@ -48,8 +91,8 @@ async def safe_warmup_transcribe(audio_file, model, model_name, model_index=None
             audio_file, model, model_name, model_index
         )
 
-        logger.debug(
-            "Warmup transcription completed for %s model", str(model_name).upper())
+        logger.debug("Warmup transcription completed for %s model",
+                     str(model_name).upper())
         return result is not None
 
     except asyncio.TimeoutError:
@@ -62,92 +105,33 @@ async def safe_warmup_transcribe(audio_file, model, model_name, model_index=None
         return False
 
 
-async def warm_up_pipeline():
-    """Warm up both transcription models for optimal performance."""
-    logger.info(
-        "Warming up DUAL MODEL transcription pipeline with fast model pool...")
-    dummy_files = []
+# Legacy function for backward compatibility (deprecated)
+def _load_models_if_needed():
+    """
+    DEPRECATED: Use model_manager.initialize_models() instead.
+    Legacy function for backward compatibility.
+    """
+    logger.warning(
+        "_load_models_if_needed() is deprecated. Use model_manager.initialize_models() instead.")
 
-    try:
-        logger.info("Loading accurate model and fast model pool for warm-up...")
-        model_accurate, model_fast_pool = models.load_models_if_needed()
+    if not model_manager.stats["models_loaded"]:
+        logger.warning(
+            "Models not loaded via ModelManager! This should be done at startup.")
+        # Try to load synchronously as fallback
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                logger.error(
+                    "Cannot load models synchronously in async context!")
+                return None, []
+            else:
+                success = loop.run_until_complete(
+                    model_manager.initialize_models(warm_up=False))
+                if not success:
+                    return None, []
+        except Exception as e:
+            logger.error("Failed to load models: %s", str(e))
+            return None, []
 
-        # Create a dummy audio file for the accurate model
-        accurate_dummy_file = audio_utils.create_dummy_audio_file(
-            "warmup_accurate.wav")
-        dummy_files.append(accurate_dummy_file)
-        logger.debug(
-            "Created warmup audio file for accurate model: %s", accurate_dummy_file)
-
-        # Warm up accurate model
-        logger.info("Warming up accurate model...")
-        accurate_success = await safe_warmup_transcribe(accurate_dummy_file, model_accurate, "accurate")
-
-        if accurate_success:
-            logger.info("✅ Accurate model warmed up successfully")
-        else:
-            logger.warning(
-                "⚠️ Accurate model warmup had issues but continuing")
-
-        # Warm up all fast models in the pool
-        logger.info("Warming up fast model pool...")
-        fast_successes = 0
-
-        warmup_tasks = []
-        for i, model_fast in enumerate(model_fast_pool):
-            logger.info("Warming up fast model %d/%d...",
-                        i+1, len(model_fast_pool))
-
-            fast_dummy_file = audio_utils.create_dummy_audio_file(
-                f"warmup_fast_{i+1}.wav")
-            dummy_files.append(fast_dummy_file)
-            logger.debug(
-                "Created warmup audio file for fast model %d: %s", i+1, fast_dummy_file)
-
-            warmup_task = safe_warmup_transcribe(
-                fast_dummy_file, model_fast, "fast", i)
-            warmup_tasks.append((warmup_task, i+1))
-
-        # Wait for all fast model warmups to complete
-        for warmup_task, model_num in warmup_tasks:
-            try:
-                success = await warmup_task
-                if success:
-                    fast_successes += 1
-                    logger.info(
-                        "✅ Fast model %d warmed up successfully", model_num)
-                else:
-                    logger.warning(
-                        "⚠️ Fast model %d warmup had issues", model_num)
-            except Exception as e:
-                logger.warning(
-                    "⚠️ Fast model %d warmup failed: %s", model_num, str(e))
-
-        # Report results
-        if fast_successes == len(model_fast_pool):
-            logger.info("✅ All fast models warmed up successfully")
-        else:
-            logger.warning("⚠️ %d/%d fast models warmed up successfully",
-                           fast_successes, len(model_fast_pool))
-
-        logger.info(
-            "🎯 Enhanced dual model pipeline warm-up complete! Ready for smart routing.")
-        logger.info("📈 Accurate model: %s, Fast model pool: %d x %s",
-                    models.MODEL_ACCURATE_NAME, models.MODEL_FAST_POOL_SIZE, models.MODEL_FAST_NAME)
-        logger.info(
-            "🚀 Total VRAM models loaded: %d models ready for parallel processing", 1 + models.MODEL_FAST_POOL_SIZE)
-
-    except Exception as e:
-        logger.error("Warmup error: %s", str(e))
-        logger.info(
-            "🔄 Models loaded but warmup incomplete - system will work normally")
-    finally:
-        # Clean up all dummy files
-        for dummy_file in dummy_files:
-            try:
-                if os.path.exists(dummy_file):
-                    os.remove(dummy_file)
-                    logger.debug("Cleaned up warmup file: %s", dummy_file)
-            except Exception as e:
-                logger.debug(
-                    "Failed to clean up warmup file %s: %s", dummy_file, str(e))
+    return model_manager.get_models()

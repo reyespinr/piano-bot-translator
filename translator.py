@@ -300,42 +300,36 @@ class VoiceTranslator:
         """Verify model loading capabilities and warm up models with timeout protection"""
         try:
             logger.info("Loading translation models...")
-            # Import utils module to access transcription functionality
-            import utils
+            from model_manager import model_manager
 
-            # Check if we have the transcribe function available
-            if hasattr(utils, "transcribe"):
-                try:
-                    # Just load the models without warmup first
-                    utils._load_models_if_needed()
-                    self.model_loaded = True
-                    logger.info("✅ Models loaded successfully")
+            # Check if models are already loaded via model manager
+            if model_manager.stats["models_loaded"]:
+                logger.info("✅ Models already loaded via ModelManager")
+                self.model_loaded = True
+                return True
 
-                    # The server.py handles the warmup, so we don't need to do it here
-                    logger.info(
-                        "✅ Model loading completed (warmup handled by server)")
-                    return True
-
-                except Exception as warmup_error:
-                    logger.warning(
-                        "Model loading error but continuing: %s", str(warmup_error))
-                    return True
+            # Initialize models via model manager
+            success = await model_manager.initialize_models(warm_up=False)
+            if success:
+                self.model_loaded = True
+                logger.info("✅ Models loaded successfully via ModelManager")
+                logger.info(
+                    "✅ Model loading completed (warmup handled by server)")
+                return True
             else:
-                logger.warning("Model loading mechanism not found")
+                logger.error("❌ Failed to load models via ModelManager")
                 return False
         except Exception as e:
             logger.error("Error during model loading: %s", str(e))
-            # Check if models were actually loaded despite the error
-            if hasattr(utils, '_load_models_if_needed'):
-                try:
-                    utils._load_models_if_needed()
-                    self.model_loaded = True
-                    logger.info("✅ Models loaded successfully despite error")
-                    return True
-                except Exception as load_error:
-                    logger.error("Failed to load models: %s", str(load_error))
-                    return False
-            return False
+            # Check if models were actually loaded despite the error via model manager
+            from model_manager import model_manager
+            if model_manager.stats["models_loaded"]:
+                self.model_loaded = True
+                logger.info("✅ Models loaded successfully despite error")
+                return True
+            else:
+                logger.error("Failed to load models: %s", str(e))
+                return False
 
     def setup_voice_receiver(self, voice_client):
         """Set up the voice receiver for a Discord voice client"""

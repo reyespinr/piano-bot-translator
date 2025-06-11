@@ -88,15 +88,19 @@ async def lifespan(app: FastAPI):
             logger.info(
                 "✅ Connection chain verified: bot_manager -> voice_translator -> websocket_handler")
         else:
+            # Create Discord bot
             logger.error("❌ Connection chain BROKEN!")
-
-        # Create Discord bot
         bot = bot_manager.create_bot(translation_callback)
 
-        # Load models
-        logger.info("Loading transcription models...")
-        await voice_translator.load_models()
-        logger.info("✅ Models loaded successfully")
+        # Initialize models using the unified ModelManager
+        logger.info("Initializing transcription models...")
+        from model_manager import model_manager
+        success = await model_manager.initialize_models(warm_up=False)
+        if success:
+            logger.info("✅ Models initialized successfully")
+        else:
+            logger.error("❌ Model initialization failed!")
+            raise Exception("Model initialization failed")
 
         # Start model warm-up
         logger.info("Starting model warm-up...")
@@ -135,11 +139,19 @@ async def lifespan(app: FastAPI):
 
 
 async def warm_up_models():
-    """Warm up transcription models in the background."""
+    """Warm up transcription models in the background using the unified ModelManager."""
     try:
         logger.info("🔥 Starting background model warm-up...")
-        await utils.warm_up_pipeline()
-        logger.info("🎯 Model warm-up completed successfully!")
+        from model_manager import model_manager
+
+        # Use the model manager's warm-up functionality
+        success = await model_manager.warm_up_models()
+
+        if success:
+            logger.info("🎯 Model warm-up completed successfully!")
+        else:
+            logger.warning(
+                "⚠️ Model warm-up had some issues but models should still work")
 
         # Broadcast ready status to all connected clients
         if websocket_manager:

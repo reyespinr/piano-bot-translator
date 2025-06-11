@@ -12,13 +12,16 @@ from logging_config import get_logger
 logger = get_logger(__name__)
 
 # CRITICAL RESTORATION: Move common hallucinations here for shared access
+# COMMON_HALLUCINATIONS = {
+#     "thank you", "thanks", "thank", "um", "hmm", "okay", "ok", "yes",
+#     "yeah", "no", "nope", "mm-hmm", "uh-huh", "uh", "ah", "oh", "wow",
+#     "nice", "good", "great", "cool", "awesome", "amazing", "perfect",
+#     "exactly", "right", "correct", "sure", "absolutely", "definitely",
+#     "maybe", "i think", "i guess", "i know", "i see", "i understand",
+#     "got it", "makes sense", "sounds good", "sounds great", "sounds cool"
+# }
 COMMON_HALLUCINATIONS = {
-    "thank you", "thanks", "thank", "um", "hmm", "okay", "ok", "yes",
-    "yeah", "no", "nope", "mm-hmm", "uh-huh", "uh", "ah", "oh", "wow",
-    "nice", "good", "great", "cool", "awesome", "amazing", "perfect",
-    "exactly", "right", "correct", "sure", "absolutely", "definitely",
-    "maybe", "i think", "i guess", "i know", "i see", "i understand",
-    "got it", "makes sense", "sounds good", "sounds great", "sounds cool"
+    "thank you", "thanks", "thank", "um", "hmm"
 }
 
 

@@ -177,22 +177,37 @@ app = FastAPI(
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint for frontend communication."""
+    """WebSocket endpoint for admin frontend communication (full control)."""
     if websocket_manager:
-        await websocket_manager.handle_connection(websocket)
+        await websocket_manager.handle_admin_connection(websocket)
     else:
         await websocket.close(code=1011, reason="Server not ready")
 
 
-# Mount static files
-app.mount("/", StaticFiles(directory="frontend", html=True), name="static")
+@app.websocket("/ws/spectator")
+async def websocket_spectator_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for spectator connections (read-only)."""
+    if websocket_manager:
+        await websocket_manager.handle_spectator_connection(websocket)
+    else:
+        await websocket.close(code=1011, reason="Server not ready")
 
 
-# Serve frontend files
+# Serve frontend files BEFORE mounting static files
 @app.get("/")
 async def serve_frontend():
     """Serve the main frontend page."""
     return FileResponse("frontend/index.html")
+
+
+@app.get("/spectator")
+async def serve_spectator():
+    """Serve the spectator frontend page."""
+    return FileResponse("frontend/spectator.html")
+
+
+# Mount static files AFTER specific routes to avoid conflicts
+app.mount("/", StaticFiles(directory="frontend", html=True), name="static")
 
 
 # Discord bot events

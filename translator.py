@@ -279,15 +279,18 @@ class VoiceTranslator:
     def setup_voice_receiver(self, voice_client):
         """Set up the voice receiver for a Discord voice client"""
         if not self.model_loaded:
-            logger.warning("Models not loaded yet!")
-
-        # Store the voice client for later use
+            logger.warning("Models not loaded yet!")        # Store the voice client for later use
         self.active_voices[voice_client.guild.id] = voice_client
 
     async def start_listening(self, voice_client):
         """Start listening and processing audio"""
         if not voice_client or not voice_client.is_connected():
             return False, "Not connected to a voice channel"
+
+        # If already listening, stop first to avoid conflicts
+        if self.is_listening:
+            logger.info("Already listening - stopping first to avoid state conflicts")
+            await self.stop_listening(voice_client)
 
         try:
             # Create sink for real-time audio processing
@@ -380,10 +383,19 @@ class VoiceTranslator:
             return False, "Not connected to a voice channel"
 
         try:
-            # Stop recording
+            # Stop recording - handle the case where we're not actually recording
             logger.debug("Stopping recording")
-            voice_client.stop_recording()
-            logger.debug("Recording stopped successfully")
+            try:
+                voice_client.stop_recording()
+                logger.debug("Recording stopped successfully")
+            except Exception as recording_error:
+                # Handle Discord.py "Not currently recording audio" error gracefully
+                error_msg = str(recording_error)
+                if "Not currently recording audio" in error_msg:
+                    logger.info("Voice client was not recording - this is expected after navigation/reconnection")
+                else:
+                    logger.warning("Unexpected error stopping recording: %s", error_msg)
+                # Continue with cleanup regardless of recording state
 
             # Add a small delay to ensure workers can complete
             logger.debug("Waiting for workers to finish...")

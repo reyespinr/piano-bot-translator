@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Piano Bot Translator - Spectator View</title>
+    <link rel="stylesheet" href="styles.css">
+    <style>
+        .spectator-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 1rem;
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+
+        .spectator-status {
+            background: #f8f9fa;
+            border-left: 4px solid #6c757d;
+            padding: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .spectator-note {
+            background: #e3f2fd;
+            border: 1px solid #2196f3;
+            border-radius: 4px;
+            padding: 0.75rem;
+            margin-bottom: 1rem;
+            font-size: 0.9rem;
+            color: #1976d2;
+        }
+
+        .connection-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 8px;
+            background-color: #dc3545;
+        }
+
+        .connection-indicator.connected {
+            background-color: #28a745;
+        }
+
+        .readonly-badge {
+            background: #6c757d;
+            color: white;
+            padding: 0.25rem 0.5rem;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: bold;
+        }
+
+        /* Use the same content layout as admin UI */
+        .content {
+            display: flex;
+            gap: 20px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .transcription-container,
+        .translation-container {
+            flex: 1;
+        }
+
+        /* Responsive design for mobile */
+        @media (max-width: 768px) {
+            .content {
+                flex-direction: column;
+                gap: 10px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <div class="spectator-header">
+            <h1>🎹 Piano Bot Translator</h1>
+            <h2>Spectator View <span class="readonly-badge">READ-ONLY</span></h2>
+            <div class="connection-status">
+                <span class="connection-indicator" id="connectionIndicator"></span>
+                <span id="connectionStatus">Connecting...</span>
+            </div>
+        </div>
+        <div class="spectator-note">
+            <strong>Spectator Mode:</strong> You can view live translations but cannot control the bot.
+            For full control, use the <a href="/">admin interface</a>.
+        </div>
+
+        <div class="content">
+            <div class="transcription-container">
+                <h2>Transcription</h2>
+                <div id="transcription-box" class="message-container"></div>
+            </div>
+
+            <div class="translation-container">
+                <h2>Translation</h2>
+                <div id="translations-container" class="message-container"></div>
+            </div>
+        </div>
+    </div>
+    <script>
+        class SpectatorApp {
+            constructor() {
+                this.websocket = null;
+                this.connectionStatus = document.getElementById('connectionStatus');
+                this.connectionIndicator = document.getElementById('connectionIndicator');
+                this.transcriptionBox = document.getElementById('transcription-box');
+                this.translationsContainer = document.getElementById('translations-container');
+
+                // Track last speakers for message continuity like admin UI
+                this.lastSpeakers = { transcription: null, translation: null };
+
+                this.connect();
+            }
+
+            connect() {
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const wsUrl = `${protocol}//${window.location.host}/ws/spectator`;
+
+                this.updateConnectionStatus('Connecting...', false);
+
+                try {
+                    this.websocket = new WebSocket(wsUrl);
+                    this.setupWebSocketHandlers();
+                } catch (error) {
+                    console.error('WebSocket connection error:', error);
+                    this.updateConnectionStatus('Connection failed', false);
+                }
+            }
+
+            setupWebSocketHandlers() {
+                this.websocket.onopen = () => {
+                    console.log('Connected to spectator WebSocket');
+                    this.updateConnectionStatus('Connected', true);
+                };
+
+                this.websocket.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        this.handleMessage(data);
+                    } catch (error) {
+                        console.error('Error parsing WebSocket message:', error);
+                    }
+                };
+
+                this.websocket.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    this.updateConnectionStatus('Connection error', false);
+                };
+
+                this.websocket.onclose = (event) => {
+                    console.log('WebSocket connection closed:', event.code, event.reason);
+                    this.updateConnectionStatus('Disconnected', false);
+
+                    // Attempt to reconnect after 3 seconds
+                    setTimeout(() => {
+                        if (this.websocket.readyState === WebSocket.CLOSED) {
+                            this.connect();
+                        }
+                    }, 3000);
+                };
+            } handleMessage(data) {
+                console.log('Received message:', data);
+
+                switch (data.type) {
+                    case 'transcription':
+                        this.handleTranscription(data.data);
+                        break;
+                    case 'translation':
+                        this.handleTranslation(data.data);
+                        break;
+                    case 'bot_ready':
+                        this.updateBotStatus(data.ready);
+                        break;
+                    case 'listen_status':
+                        this.updateListeningStatus(data.is_listening);
+                        break;
+                    default:
+                        console.log('Unknown message type:', data.type);
+                }
+            } updateConnectionStatus(status, connected) {
+                this.connectionStatus.textContent = status;
+                this.connectionIndicator.className = `connection-indicator ${connected ? 'connected' : ''}`;
+            }
+
+            updateBotStatus(ready) {
+                console.log('Bot ready status:', ready);
+            }
+
+            handleTranscription(data) {
+                if (data) {
+                    this.displayMessageWithContinuity(this.transcriptionBox, data, 'transcription');
+                    this.trimMessages(this.transcriptionBox);
+                }
+            }
+
+            handleTranslation(data) {
+                if (data) {
+                    this.displayMessageWithContinuity(this.translationsContainer, data, 'translation');
+                    this.trimMessages(this.translationsContainer);
+                }
+            }
+
+            displayMessageWithContinuity(container, data, type) {
+                const user = data.user;
+                const text = data.text;
+                const userId = String(data.user_id);
+
+                // Get the appropriate last speaker
+                const lastSpeaker = this.lastSpeakers[type];
+
+                // Get existing messages in container
+                const lastMessage = container.lastElementChild;
+
+                // Check if we can combine with the last message
+                if (lastSpeaker === user && lastMessage && String(lastMessage.dataset.userId) === userId) {
+                    // Same speaker, append to existing message
+                    const contentSpan = lastMessage.querySelector('.message-content');
+                    if (contentSpan) {
+                        contentSpan.textContent += ' ' + text.trim();
+                        this.scrollToBottom(container);
+                        return;
+                    }
+                }
+
+                // Different speaker or no previous message, create new message
+                this.createNewMessage(container, user, text, userId);
+
+                // Update last speaker for this message type AFTER creating the message
+                this.lastSpeakers[type] = user;
+
+                this.scrollToBottom(container);
+            }
+
+            createNewMessage(container, user, text, userId) {
+                const messageElement = document.createElement('div');
+                messageElement.className = 'message';
+                messageElement.dataset.userId = userId;
+
+                const userElement = document.createElement('strong');
+                userElement.textContent = user + ': ';
+
+                const contentElement = document.createElement('span');
+                contentElement.className = 'message-content';
+                contentElement.textContent = text.trim();
+
+                messageElement.appendChild(userElement);
+                messageElement.appendChild(contentElement);
+                container.appendChild(messageElement);
+            }
+
+            scrollToBottom(container) {
+                container.scrollTop = container.scrollHeight;
+            }
+
+            trimMessages(container) {
+                const messages = container.children;
+                while (messages.length > 100) {
+                    container.removeChild(messages[0]);
+                }
+            }
+
+            escapeHtml(text) {
+                const div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
+            }
+        }
+
+        // Start the spectator app when page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            new SpectatorApp();
+        });
+    </script>
+</body>
+
+</html>

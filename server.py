@@ -9,7 +9,7 @@ import sys
 import traceback
 import uvicorn
 import discord
-import utils
+import translation_utils
 from discord.ext import commands
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket
@@ -19,7 +19,7 @@ from pathlib import Path
 
 from bot_manager import DiscordBotManager
 from websocket_handler import WebSocketManager
-from translator import VoiceTranslator
+from translation_service import VoiceTranslator
 from cleanup import clean_temp_files
 from logging_config import get_logger
 
@@ -231,7 +231,7 @@ async def on_ready():
 
 # Initialize voice translator
 async def initialize_translator():
-    """Initialize the voice translator."""
+    """Initialize the voice translation_service."""
     global voice_translator
     voice_translator = VoiceTranslator(None)  # Callback will be set later
     voice_translator.set_websocket_handler(websocket_manager)

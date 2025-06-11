@@ -16,7 +16,7 @@ from dataclasses import dataclass
 import torch
 
 from model_manager import model_manager
-from audio_utils import COMMON_HALLUCINATIONS
+from audio_processing_utils import COMMON_HALLUCINATIONS
 from logging_config import get_logger
 
 logger = get_logger(__name__)

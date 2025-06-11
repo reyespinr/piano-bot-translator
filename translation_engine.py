@@ -13,7 +13,7 @@ import sys
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Tuple, Any
 
-from custom_sink import RealTimeWaveSink
+from audio_sink import RealTimeWaveSink
 from logging_config import get_logger
 
 logger = get_logger(__name__)

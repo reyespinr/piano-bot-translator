@@ -6,12 +6,12 @@ for Discord voice channels. It handles audio processing, language detection,
 transcription, and translation using machine learning models.
 
 REFACTORED: Large methods have been broken down into modular components
-in translator_core.py for better maintainability and testing.
+in translation_engine.py for better maintainability and testing.
 """
 import asyncio
 from typing import Callable
 
-from translator_core import (
+from translation_engine import (
     VoiceTranslatorState,
     AudioSinkSetup,
     DiscordAudioProtection,

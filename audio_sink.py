@@ -7,7 +7,7 @@ between specialized components for audio processing, worker management,
 session tracking, and voice activity detection.
 
 REFACTORED: Large methods have been broken down into modular components
-in custom_sink_core.py for better maintainability and testing.
+in audio_sink_core.py for better maintainability and testing.
 
 Features:
 - Modular architecture with separated concerns
@@ -19,7 +19,7 @@ Features:
 import time
 from discord.sinks import WaveSink
 
-from custom_sink_core import (
+from audio_sink_core import (
     AudioSinkState,
     AudioSinkInitializer,
     UserProcessingChecker,
@@ -198,7 +198,7 @@ class RealTimeWaveSink(WaveSink):
             logger.error("Error in write method for user %s: %s", user, str(e))
 
     def process_speech_buffer(self, user):
-        """Process the speech buffer for a user and queue for transcription."""
+        """Process the speech buffer for a user and queue for transcription_service."""
         # Check if user processing is enabled before processing buffer
         if not self._should_process_user(user, None):
             logger.debug(

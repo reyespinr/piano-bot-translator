@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Callable, Tuple
 
-import utils
+import translation_utils
 from logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -193,7 +193,7 @@ class AudioBufferProcessor:
     """Handles audio buffer operations and speech processing."""
     @staticmethod
     def process_speech_buffer(user: str, buffer_manager: Any, session: Any, worker_manager: Any = None) -> None:
-        """Process the speech buffer for a user and queue for transcription."""
+        """Process the speech buffer for a user and queue for transcription_service."""
         user_state = buffer_manager.get_user_state(user)
 
         # Update session state and tracking variables
@@ -215,7 +215,7 @@ class AudioBufferProcessor:
 
     @staticmethod
     def _create_and_queue_audio_file(user: str, current_time: float, buffer_manager: Any, worker_manager: Any = None) -> None:
-        """Create audio file and queue for transcription."""
+        """Create audio file and queue for transcription_service."""
         try:
             # Create audio file
             audio_filename, success = buffer_manager.create_audio_file(
@@ -307,8 +307,8 @@ class TranscriptionProcessor:
     async def _perform_transcription(audio_file: str, user: str, gui_callback: Callable) -> Tuple[str, str]:
         """Perform the actual transcription with error handling."""
         try:
-            logger.debug("📞 Calling utils.transcribe for file: %s", audio_file)
-            transcribed_text, detected_language = await utils.transcribe(audio_file)
+            logger.debug("📞 Calling translation_utils.transcribe for file: %s", audio_file)
+            transcribed_text, detected_language = await translation_utils.transcribe(audio_file)
             logger.debug("🎯 Transcription result for user %s: text='%s', language=%s",
                          user, transcribed_text, detected_language)
             return transcribed_text, detected_language
@@ -344,14 +344,14 @@ class TranscriptionProcessor:
     async def _handle_translation(transcribed_text: str, detected_language: str,
                                   user: str, gui_callback: Callable) -> None:
         """Handle translation logic."""
-        should_translate_result = await utils.should_translate(transcribed_text, detected_language)
+        should_translate_result = await translation_utils.should_translate(transcribed_text, detected_language)
         logger.debug("🔍 Translation needed for user %s: %s",
                      user, should_translate_result)
 
         if should_translate_result:
             # Translate the text
             logger.debug("🌍 Translating text for user %s", user)
-            translated_text = await utils.translate(transcribed_text)
+            translated_text = await translation_utils.translate(transcribed_text)
             logger.debug("🌍 Translation result for user %s: %s",
                          user, translated_text)
 

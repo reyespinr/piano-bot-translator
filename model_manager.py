@@ -1,5 +1,5 @@
 """
-Refactored Model Manager for audio transcription.
+Refactored Model Manager for audio transcription_service.
 
 This module provides a centralized, modular approach to loading and managing
 Whisper models with YAML configuration support. Follows the "composition over inheritance"

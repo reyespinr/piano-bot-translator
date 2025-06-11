@@ -6,18 +6,18 @@ Whisper models, with intelligent routing between accurate and fast models.
 Now uses the unified ModelManager for better organization.
 
 REFACTORED: Large functions have been broken down into modular components
-in transcription_core.py for better maintainability and testing.
+in transcription_engine.py for better maintainability and testing.
 """
 import gc
 import string
 import traceback
 import uuid
 import torch
-import audio_utils
+import audio_processing_utils
 from model_manager import model_manager
-from audio_utils import COMMON_HALLUCINATIONS
+from audio_processing_utils import COMMON_HALLUCINATIONS
 from logging_config import get_logger
-from transcription_core import transcribe_with_model_refactored
+from transcription_engine import transcribe_with_model_refactored
 
 logger = get_logger(__name__)
 
@@ -98,7 +98,7 @@ def should_use_fast_model(audio_file_path, current_queue_size=0, concurrent_requ
     """Determine which model to use based on audio duration and system load"""
 
     # Get audio duration
-    duration = audio_utils.get_audio_duration_from_file(audio_file_path)
+    duration = audio_processing_utils.get_audio_duration_from_file(audio_file_path)
 
     # Get current system state from model manager
     stats = model_manager.get_stats()
@@ -213,7 +213,7 @@ async def transcribe_with_model(audio_file, model, model_name, model_index=None)
     REFACTORED: This function now delegates to the modular implementation.
 
     Backward compatibility wrapper for the old massive function.
-    The actual logic is now in transcription_core.py for better maintainability.
+    The actual logic is now in transcription_engine.py for better maintainability.
     """
     return (await transcribe_with_model_refactored(audio_file, model, model_name, model_index))
 

@@ -14,7 +14,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Tuple, Optional
 import stable_whisper
-import audio_utils
+import audio_processing_utils
 from config_manager import ModelTierConfig
 from logging_config import get_logger
 
@@ -85,7 +85,7 @@ class ModelWarmup:
                     tier.models) > 1 else tier_name.upper()
 
                 # Create dummy audio file for this model
-                dummy_file = audio_utils.create_dummy_audio_file(
+                dummy_file = audio_processing_utils.create_dummy_audio_file(
                     f"warmup_{tier_name}_{i+1}.wav")
                 dummy_files.append(dummy_file)
 

@@ -1,5 +1,5 @@
 """
-Background worker management for audio transcription.
+Background worker management for audio transcription_service.
 Handles worker threads, health monitoring, and queue management.
 """
 import asyncio
@@ -56,7 +56,7 @@ class AudioWorkerManager:
                         i+1, self.num_workers, worker_id)
 
     def queue_audio_file(self, user, audio_filename, timeout=1.0):
-        """Queue an audio file for transcription."""
+        """Queue an audio file for transcription_service."""
         try:
             self.queue.put((user, audio_filename), timeout=timeout)
             logger.debug("Queued audio file for user %s: %s",

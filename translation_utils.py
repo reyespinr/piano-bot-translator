@@ -8,13 +8,13 @@ from logging_config import get_logger
 
 # Import the new model manager
 from model_manager import model_manager
-import transcription
+import transcription_service
 import translation
 
 logger = get_logger(__name__)
 
 # Re-export the main functions for backward compatibility
-transcribe = transcription.transcribe
+transcribe = transcription_service.transcribe
 translate = translation.translate
 should_translate = translation.should_translate
 

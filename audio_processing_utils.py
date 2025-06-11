@@ -1,8 +1,8 @@
 """
-Audio processing utilities for Discord voice transcription.
+Audio processing utilities for Discord voice transcription_service.
 
 This module provides audio file processing, validation, and creation utilities
-for handling Discord voice data and preparing it for transcription.
+for handling Discord voice data and preparing it for transcription_service.
 """
 import wave
 import numpy as np

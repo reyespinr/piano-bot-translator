@@ -323,5 +323,18 @@
     "total_classes": 61,
     "total_imports": 179,
     "total_size_bytes": 267309
+  },
+  {
+    "analysis_date": "2025-06-11T09:27:56.200910",
+    "total_files": 27,
+    "total_lines": 6548,
+    "total_code_lines": 4190,
+    "total_comment_lines": 475,
+    "total_docstring_lines": 661,
+    "total_blank_lines": 1222,
+    "total_functions": 190,
+    "total_classes": 61,
+    "total_imports": 179,
+    "total_size_bytes": 267309
   }
 ]

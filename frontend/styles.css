@@ -56,6 +56,8 @@ h2 {
     display: flex;
     gap: 15px;
     margin-top: 10px;
+    height: calc(95vh - 140px);
+    /* Account for header and status bar */
 }
 
 .control-panel {
@@ -68,6 +70,7 @@ h2 {
     display: flex;
     flex-direction: column;
     max-width: 300px;
+    height: fit-content;
 }
 
 .transcription-container,
@@ -76,6 +79,7 @@ h2 {
     display: flex;
     flex-direction: column;
     margin-bottom: 8px;
+    height: 100%;
 }
 
 /* Improved status bar */
@@ -302,15 +306,14 @@ input:checked+.toggle-slider:before {
     border-radius: 4px;
     padding: 12px;
     margin: 6px 0;
-    height: 250px;
-    /* Reduced height */
+    flex: 1;
+    min-height: 200px;
     overflow-y: auto;
     font-family: 'Whitney', 'Helvetica Neue', Helvetica, Arial, sans-serif;
     width: 100% !important;
     max-width: 100%;
     box-sizing: border-box;
     display: block;
-    flex: 1 1 auto;
 }
 
 /* === Message Styling === */

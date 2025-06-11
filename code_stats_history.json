@@ -1,0 +1,15 @@
+[
+  {
+    "analysis_date": "2025-06-09T21:35:53.451933",
+    "total_files": 13,
+    "total_lines": 4958,
+    "total_code_lines": 3264,
+    "total_comment_lines": 467,
+    "total_docstring_lines": 358,
+    "total_blank_lines": 869,
+    "total_functions": 84,
+    "total_classes": 16,
+    "total_imports": 110,
+    "total_size_bytes": 209247
+  }
+]

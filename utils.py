@@ -1,259 +1,137 @@
 """
 Audio transcription and translation utilities.
 
-This module provides functions for transcribing audio to text using stable-ts
-(an enhanced version of Whisper) and translating text between languages using 
-DeepL's API. It includes a preloaded model to improve performance across 
-multiple transcription requests.
-
-Features:
-- Voice Activity Detection (VAD) to filter non-speech audio
-- Confidence-based transcription filtering
-- Common hallucination detection and prevention
-- Automatic language detection
-- Translation optimization to preserve API quota
-- Pipeline warm-up for improved first-inference performance
-- Multi-worker compatible model sharing
+This module provides the main interface for transcription and translation
+functionality, now using the unified ModelManager for better organization.
 """
+import asyncio
 import os
-import wave
-import string
-import numpy as np
-import requests
-import stable_whisper
+import uuid
 from logging_config import get_logger
 
-# Initialize logger for this module
+# Import the new model manager
+from model_manager import model_manager
+import transcription
+import translation
+
 logger = get_logger(__name__)
 
-# Model reference (will be loaded on demand, not at import time)
-MODEL = None
-MODEL_NAME = "large-v3-turbo"
-# MODEL_NAME = "base"
-
-
-# Common hallucinations to filter out
-COMMON_HALLUCINATIONS = {
-    "thank you", "thanks", "thank", "um", "hmm"
-}
-
-
-def _load_model_if_needed():
-    """Lazy load the model only when needed - truly on-demand loading"""
-    # pylint: disable-next=global-statement
-    global MODEL
-    if MODEL is None:
-        logger.info("Loading stable-ts %s model...", MODEL_NAME)
-        MODEL = stable_whisper.load_model(MODEL_NAME, device="cuda")
-        logger.info("stable-ts model loaded successfully!")
-    return MODEL
-
-
-async def transcribe(audio_file_path):
-    """Transcribe speech from an audio file to text with confidence filtering.
-
-    This function processes audio through the stable-ts model with VAD (Voice
-    Activity Detection) and applies multiple filtering layers to ensure quality:
-    1. VAD to filter out non-speech audio
-    2. Focus on human speech frequencies
-    3. Additional confidence threshold filtering
-    4. Language detection to determine if translation is needed
-
-    Args:
-        audio_file_path (str): Path to the audio file to transcribe
-
-    Returns:
-        tuple: (transcribed_text, detected_language)
-            - transcribed_text (str): The transcribed text or empty if filtered
-            - detected_language (str): ISO language code detected by Whisper
-    """
-    # Make sure model is loaded (true lazy loading)
-    model = _load_model_if_needed()
-
-    # Use the model for transcription with enhanced settings
-    result = model.transcribe(
-        audio_file_path,
-        vad=True,                  # Enable Voice Activity Detection
-        vad_threshold=0.35,        # VAD confidence threshold
-        no_speech_threshold=0.6,   # Filter non-speech sections
-        max_instant_words=0.3,     # Reduce hallucination words
-        suppress_silence=True,     # Use silence detection for better timestamps
-        only_voice_freq=True,      # Focus on human voice frequency range
-        word_timestamps=True       # Important for proper segmentation
-    )
-
-    # Extract text and detected language
-    transcribed_text = result.text if result.text else ""
-    # Handle Austrian German misidentified as Icelandic
-    detected_language = result.language if result.language else ""
-    if detected_language == "is":  # "is" is the language code for Icelandic
-        logger.info(
-            "Detected Icelandic - likely Austrian German. Re-transcribing as German...")
-        # Re-transcribe with German as forced language
-        result = model.transcribe(
-            audio_file_path,
-            vad=True,
-            vad_threshold=0.35,
-            no_speech_threshold=0.6,
-            max_instant_words=0.3,
-            suppress_silence=True,
-            only_voice_freq=True,
-            word_timestamps=True,
-            language="de"  # Force German language
-        )
-        transcribed_text = result.text if result.text else ""
-        detected_language = "de"  # Override detected language to German
-        logger.info("Re-transcribed as German")
-
-    # Apply additional confidence filtering as a safety net
-    if hasattr(result, "segments") and result.segments:
-        # Get confidence values
-        confidences = []
-        for segment in result.segments:
-            if hasattr(segment, "avg_logprob"):
-                confidences.append(segment.avg_logprob)
-
-        # Apply our confidence thresholds if we have confidence data
-        if confidences:
-            # General confidence threshold
-            avg_log_prob = sum(confidences) / len(confidences)
-            confidence_threshold = -1.5
-            if avg_log_prob < confidence_threshold:
-                logger.info(
-                    "Low confidence transcription rejected (%s): '%s'",
-                    f"{avg_log_prob:.2f}", transcribed_text)
-                return "", detected_language
-
-            # Special case for common hallucinations
-            text = transcribed_text.strip().lower()
-            text_clean = text.translate(
-                str.maketrans('', '', string.punctuation))
-
-            if len(text_clean) < 15 and text_clean in COMMON_HALLUCINATIONS:
-                # For these common short responses, require higher confidence
-                stricter_threshold = -0.5
-                if avg_log_prob < stricter_threshold:
-                    logger.info(
-                        "Short statement '%s' rejected with confidence %.2f", text, avg_log_prob)
-                    return "", detected_language
-
-            logger.info(
-                "Transcription confidence: %.2f, Language: %s", avg_log_prob, detected_language)
-
-    # Return both the text and detected language
-    return transcribed_text, detected_language
-
-
-async def translate(text):
-    """Translate text to English using DeepL's API.
-
-    Sends the provided text to DeepL's translation API and returns
-    the English translation.
-
-    Args:
-        text (str): The text to be translated
-
-    Returns:
-        str: The translated text in English
-    """
-    response = requests.post(
-        "https://api-free.deepl.com/v2/translate",
-        data={
-            "auth_key": "5ac935ea-9ed2-40a7-bd4d-8153c941c79f:fx",
-            "text": text,
-            "target_lang": "EN"
-        },
-        timeout=10
-    )
-    translation = response.json()["translations"][0]["text"]
-    return translation
-
-
-async def should_translate(text, detected_language):
-    """Determine if text needs translation based on language and content.
-
-    This function optimizes translation API usage by avoiding unnecessary
-    translations of English text, while still detecting mixed-language content
-    that might need translation.
-
-    Args:
-        text (str): The text to potentially translate
-        detected_language (str): Language code detected by Whisper
-
-    Returns:
-        bool: True if text should be translated, False otherwise
-    """
-    # Always skip empty text
-    if not text:
-        return False
-
-    # Skip if dominant language is English
-    if detected_language == "en":
-        # Check if there are likely non-English segments
-        # This simple heuristic checks for characters common in non-Latin alphabets
-        non_ascii_ratio = len([c for c in text if ord(c) > 127]) / len(text)
-        if non_ascii_ratio > 0.1:  # If more than 10% non-ASCII, translate anyway
-            logger.info(
-                "Detected mixed language content (non-ASCII ratio: %.2f - translating)",
-                non_ascii_ratio)
-            return True
-        return False
-
-    # Non-English dominant language should be translated
-    return True
-
-
-def create_dummy_audio_file(filename="warmup_audio.wav"):
-    """Create a small audio file for model warm-up.
-
-    Args:
-        filename (str): Name of the dummy audio file to create
-
-    Returns:
-        str: Path to the created audio file
-    """
-    # Create a 1-second file of silence (with a tiny bit of noise)
-    # using the format Whisper expects (16kHz, 16-bit, mono)
-    sample_rate = 16000
-    duration = 1  # 1 second
-
-    # Create an array of small random values (quiet noise)
-    audio_data = np.random.normal(
-        0, 0.01, sample_rate * duration).astype(np.int16)
-
-    # Write to WAV file
-    with wave.Wave_write(filename) as wf:
-        wf.setnchannels(1)  # Mono
-        wf.setsampwidth(2)  # 16-bit
-        wf.setframerate(sample_rate)
-        wf.writeframes(audio_data.tobytes())
-
-    return filename
+# Re-export the main functions for backward compatibility
+transcribe = transcription.transcribe
+translate = translation.translate
+should_translate = translation.should_translate
 
 
 async def warm_up_pipeline():
-    """Warm up the transcription pipeline.
-
-    Runs a quick inference through the model to:
-    - Pre-compile CUDA kernels
-    - Allocate GPU memory
-    - Initialize internal caches
-    - Optimize execution paths
-
-    This significantly reduces the delay for the first real transcription.
     """
-    logger.info("Warming up transcription pipeline...")
+    Warm up transcription models using the unified ModelManager.
+    This is the new, organized way to warm up models.
+    """
+    logger.info("🔥 Starting unified model warm-up pipeline...")
+
     try:
-        # Create a dummy audio file
-        dummy_file = create_dummy_audio_file()
+        # Use the model manager's warm-up functionality
+        success = await model_manager.warm_up_models()
 
-        # Run through transcription
-        await transcribe(dummy_file)
+        if success:
+            logger.info(
+                "🎯 Enhanced dual model pipeline warm-up complete! Ready for smart routing.")
+            stats = model_manager.get_stats()
+            logger.info("📈 Accurate models: %d x %s, Fast models: %d x %s",
+                        stats["accurate_models"], model_manager.accurate_config.name,
+                        stats["fast_models"], model_manager.fast_config.name)
+            logger.info("🚀 Total VRAM models loaded: %d models ready for parallel processing",
+                        stats["accurate_models"] + stats["fast_models"])
+            return True
+        else:
+            logger.warning(
+                "⚠️ Model warm-up had some issues but models should still work")
+            return False
 
-        # Clean up
-        if os.path.exists(dummy_file):
-            os.remove(dummy_file)
+    except Exception as e:
+        logger.error("❌ Model warm-up failed: %s", str(e))
+        logger.info("🔄 Models may still work without warm-up")
+        return False
 
-        logger.info("Pipeline warm-up complete")
-    except (IOError, FileNotFoundError, PermissionError, RuntimeError) as e:
-        logger.error("Warm-up error (non-critical): %s", str(e))
+
+# Backward compatibility function (deprecated)
+async def safe_warmup_transcribe(audio_file, model, model_name, model_index=None):
+    """
+    DEPRECATED: Use model_manager.warm_up_models() instead.
+    Safe transcription for warmup with timeout and error handling.
+    """
+    logger.warning(
+        "safe_warmup_transcribe() is deprecated. Use model_manager.warm_up_models() instead.")
+
+    try:
+        if model_name == "fast":
+            model_display_name = f"FAST-{model_index + 1}"
+            transcription_id = str(uuid.uuid4())[:8]
+
+            # Get the lock from model manager
+            if model_index < len(model_manager.fast_tier.locks):
+                model_lock = model_manager.fast_tier.locks[model_index]
+            else:
+                logger.error("Invalid model index: %d", model_index)
+                return False
+
+            def warmup_transcribe():
+                with model_lock:
+                    return model.transcribe(audio_file, language="en", word_timestamps=False)
+
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, warmup_transcribe)
+
+            logger.debug(
+                "Warmup transcription completed for %s model", model_display_name)
+            return result is not None
+
+        # Accurate model warmup - use normal transcribe_with_model
+        transcribed_text, detected_language, result = await transcription.transcribe_with_model(
+            audio_file, model, model_name, model_index
+        )
+
+        logger.debug("Warmup transcription completed for %s model",
+                     str(model_name).upper())
+        return result is not None
+
+    except asyncio.TimeoutError:
+        logger.warning("Warmup transcription timed out for %s model - continuing anyway",
+                       model_name.upper() + (f"-{model_index + 1}" if model_index is not None else ""))
+        return False
+    except Exception as e:
+        logger.warning("Warmup transcription failed for %s model: %s - continuing anyway",
+                       model_name.upper() + (f"-{model_index + 1}" if model_index is not None else ""), str(e))
+        return False
+
+
+# Legacy function for backward compatibility (deprecated)
+def _load_models_if_needed():
+    """
+    DEPRECATED: Use model_manager.initialize_models() instead.
+    Legacy function for backward compatibility.
+    """
+    logger.warning(
+        "_load_models_if_needed() is deprecated. Use model_manager.initialize_models() instead.")
+
+    if not model_manager.stats["models_loaded"]:
+        logger.warning(
+            "Models not loaded via ModelManager! This should be done at startup.")
+        # Try to load synchronously as fallback
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                logger.error(
+                    "Cannot load models synchronously in async context!")
+                return None, []
+            else:
+                success = loop.run_until_complete(
+                    model_manager.initialize_models(warm_up=False))
+                if not success:
+                    return None, []
+        except Exception as e:
+            logger.error("Failed to load models: %s", str(e))
+            return None, []
+
+    return model_manager.get_models()

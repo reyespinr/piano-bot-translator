@@ -30,11 +30,14 @@ class AudioSinkState:
     parent: Optional[Any] = None
     translation_callback: Optional[Callable] = None
     last_block_log_time: Dict[str, float] = None
+    _user_log_times: Dict[str, float] = None
 
     def __post_init__(self):
         """Initialize mutable defaults."""
         if self.last_block_log_time is None:
             self.last_block_log_time = {}
+        if self._user_log_times is None:
+            self._user_log_times = {}
 
 
 class AudioSinkInitializer:
@@ -73,11 +76,31 @@ class UserProcessingChecker:
     """Handles user processing state validation."""
 
     @staticmethod
-    def should_process_user(sink_state: AudioSinkState, user: str, data: Any) -> bool:
+    def should_process_user(sink_state: AudioSinkState, user: Any, data: Any) -> bool:
         """Check if user should be processed based on enabled state."""
         if (sink_state.parent and
                 hasattr(sink_state.parent, 'user_processing_enabled')):
-            return sink_state.parent.user_processing_enabled.get(str(user), True)
+            # Convert user to string ID for lookup - handle both Discord User objects and strings
+            user_id = str(user.id) if hasattr(user, 'id') else str(user)
+            is_enabled = sink_state.parent.user_processing_enabled.get(
+                user_id, True)
+
+            # Rate-limited logging to prevent spam (only log every few seconds per user)
+            current_time = time.time()
+            if not hasattr(sink_state, '_user_log_times'):
+                sink_state._user_log_times = {}
+
+            last_log_time = sink_state._user_log_times.get(user_id, 0)
+            if current_time - last_log_time > 5.0:  # Log once every 5 seconds per user
+                if not is_enabled:
+                    logger.info(
+                        "🚫 User processing DISABLED for User: %s (ID: %s)", user, user_id)
+                else:
+                    logger.debug(
+                        "✅ User processing enabled for User: %s (ID: %s)", user, user_id)
+                sink_state._user_log_times[user_id] = current_time
+
+            return is_enabled
         return True
 
     @staticmethod
@@ -168,9 +191,8 @@ class SilencePauseHandler:
 
 class AudioBufferProcessor:
     """Handles audio buffer operations and speech processing."""
-
     @staticmethod
-    def process_speech_buffer(user: str, buffer_manager: Any, session: Any) -> None:
+    def process_speech_buffer(user: str, buffer_manager: Any, session: Any, worker_manager: Any = None) -> None:
         """Process the speech buffer for a user and queue for transcription."""
         user_state = buffer_manager.get_user_state(user)
 
@@ -189,10 +211,10 @@ class AudioBufferProcessor:
 
         # Create and queue audio file
         AudioBufferProcessor._create_and_queue_audio_file(
-            user, current_time, buffer_manager)
+            user, current_time, buffer_manager, worker_manager)
 
     @staticmethod
-    def _create_and_queue_audio_file(user: str, current_time: float, buffer_manager: Any) -> None:
+    def _create_and_queue_audio_file(user: str, current_time: float, buffer_manager: Any, worker_manager: Any = None) -> None:
         """Create audio file and queue for transcription."""
         try:
             # Create audio file
@@ -201,8 +223,11 @@ class AudioBufferProcessor:
             if not success:
                 return
 
-            # Get worker manager and manage queue overflow
-            worker_manager = getattr(buffer_manager, 'worker_manager', None)
+            # Use provided worker manager or try to get from buffer manager
+            if not worker_manager:
+                worker_manager = getattr(
+                    buffer_manager, 'worker_manager', None)
+
             if worker_manager:
                 worker_manager.manage_queue_overflow()
 
@@ -211,6 +236,12 @@ class AudioBufferProcessor:
                     buffer_manager.update_processed_time(user, current_time)
                     logger.debug("Queued audio file for user %s: %s",
                                  user, audio_filename)
+                else:
+                    logger.warning("Failed to queue audio file for user %s: %s",
+                                   user, audio_filename)
+            else:
+                logger.error("Worker manager not available - cannot queue audio file for user %s: %s",
+                             user, audio_filename)
 
         except Exception as e:
             logger.error(
@@ -338,16 +369,13 @@ class TranscriptionProcessor:
 
 class QueueMonitor:
     """Handles queue monitoring and inactive speaker detection."""
-
     @staticmethod
-    def check_inactive_speakers(worker_manager: Any, buffer_manager: Any, last_queue_log_time: Dict[str, float]) -> None:
+    def check_inactive_speakers(worker_manager: Any, buffer_manager: Any,
+                                last_queue_log_time: Dict[str, float],
+                                restart_callback: Callable = None, sink_state: AudioSinkState = None) -> None:
         """Periodically check for users who have stopped speaking but haven't been processed."""
         try:
             current_time = time.time()
-
-            # Monitor queue with reduced frequency to prevent log spam
-            QueueMonitor._monitor_queue_status(
-                worker_manager, current_time, last_queue_log_time)
 
             # Check for inactive speakers
             users_to_process = buffer_manager.check_inactive_speakers(
@@ -356,13 +384,19 @@ class QueueMonitor:
             for user in users_to_process:
                 try:
                     QueueMonitor._process_inactive_user(
-                        user, worker_manager, buffer_manager, current_time)
+                        user, worker_manager, buffer_manager, current_time, sink_state)
                 except Exception as user_error:
                     logger.error(
                         "Error processing inactive user %s: %s", user, str(user_error))
 
-            # Restart timer
-            QueueMonitor._restart_timer(worker_manager)
+            # Monitor queue with reduced frequency to prevent log spam
+            QueueMonitor._monitor_queue_status(
+                worker_manager, current_time, last_queue_log_time)
+
+            # Perform worker health check
+            worker_manager.check_health()            # Restart timer if callback provided
+            if restart_callback:
+                QueueMonitor._restart_timer(worker_manager, restart_callback)
 
         except Exception as e:
             logger.error("Error in _check_inactive_speakers: %s", str(e))
@@ -385,8 +419,17 @@ class QueueMonitor:
             last_queue_log_time['queue'] = current_time
 
     @staticmethod
-    def _process_inactive_user(user: str, worker_manager: Any, buffer_manager: Any, current_time: float) -> None:
+    def _process_inactive_user(user: str, worker_manager: Any, buffer_manager: Any, current_time: float, sink_state: AudioSinkState = None) -> None:
         """Process an inactive user."""
+
+        # Check if user processing is enabled
+        if sink_state and not UserProcessingChecker.should_process_user(sink_state, user, None):
+            logger.debug(
+                "Skipping inactive user processing for disabled user: %s", user)
+            # Still reset the user's speech state to prevent buffer accumulation
+            buffer_manager.reset_speech_state(user)
+            return
+
         logger.debug("Processing inactive user: %s", user)
 
         # Create audio file
@@ -405,12 +448,11 @@ class QueueMonitor:
             logger.debug("Queued inactive user audio: %s", audio_filename)
 
     @staticmethod
-    def _restart_timer(worker_manager: Any) -> None:
+    def _restart_timer(worker_manager: Any, callback: Callable) -> None:
         """Restart the monitoring timer."""
         try:
-            if hasattr(worker_manager, 'timer'):
-                worker_manager.timer = threading.Timer(
-                    1.0, lambda: None)  # Placeholder
+            if worker_manager.running:
+                worker_manager.timer = threading.Timer(1.0, callback)
                 worker_manager.timer.daemon = True
                 worker_manager.timer.start()
         except Exception as timer_error:

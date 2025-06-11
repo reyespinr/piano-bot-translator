@@ -78,22 +78,23 @@ class WebSocketStateManager:
         """Update bot manager and translator with current user processing states."""
         try:
             # Update bot manager
-            bot_manager.user_processing_enabled = self.user_processing_enabled.copy()
-
             # Update translator if available
+            bot_manager.user_processing_enabled = self.user_processing_enabled.copy()
             if (hasattr(bot_manager, 'voice_translator') and
                     bot_manager.voice_translator):
                 # Update translator's user settings (FIXED: Updated for refactored structure)
                 bot_manager.voice_translator.state.user_processing_enabled = self.user_processing_enabled.copy()
 
-                # Update sink if available
-                if (hasattr(bot_manager.voice_translator, 'sink') and
-                        bot_manager.voice_translator.sink):
+                # Update sink if available - FIXED: Access through state
+                if (hasattr(bot_manager.voice_translator.state, 'sink') and
+                        bot_manager.voice_translator.state.sink):
 
-                    sink = bot_manager.voice_translator.sink
+                    sink = bot_manager.voice_translator.state.sink
                     if not hasattr(sink, 'parent') or not sink.parent:
                         sink.parent = type('obj', (object,), {})()
                     sink.parent.user_processing_enabled = self.user_processing_enabled.copy()
+                    logger.debug("Updated sink parent with user processing states: %s",
+                                 list(self.user_processing_enabled.keys()))
 
             logger.debug(
                 "Updated bot manager and translator with user processing states")

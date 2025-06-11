@@ -71,8 +71,8 @@ def create_dummy_audio_file(filename="warmup_audio.wav"):
         audio_data = np.column_stack((audio_data, audio_data))
 
     # Write to WAV file
-    with wave.open(filename, 'wb') as wf:
-        wf.setnchannels(channels)
+    with wave.Wave_write(filename) as wf:
+        wf.setnchannels(1)  # Mono
         wf.setsampwidth(2)  # 16-bit
         wf.setframerate(sample_rate)
         wf.writeframes(audio_data.tobytes())

@@ -7,12 +7,10 @@ transcription, and translation using machine learning models.
 """
 import asyncio
 import os
-import traceback
 import struct
 import sys
 import gc
 import subprocess
-import translation
 from typing import Callable
 from custom_sink import RealTimeWaveSink
 from logging_config import get_logger
@@ -121,59 +119,6 @@ class VoiceTranslator:
                 "Sent user updates: %d users with processing states", len(users))
         except Exception as e:
             logger.error("Failed to send user updates: %s", str(e))
-
-    async def start_listening(self):
-        """Start listening to voice channel audio with real-time processing."""
-        if not self.voice_client:
-            logger.error("No voice client available")
-            return False
-
-        if self.is_listening:
-            logger.warning("Already listening")
-            return True
-
-        try:
-            logger.info("Creating voice processing sink...")
-
-            # Create the sink with proper callback
-            self.sink = RealTimeWaveSink(
-                pause_threshold=1.0,
-                event_loop=asyncio.get_event_loop(),
-                num_workers=6
-            )
-
-            # Set the parent reference for user toggle access
-            self.sink.parent = self
-
-            # Set the translation callback
-            self.sink.translation_callback = self.process_audio_callback
-
-            # Apply Discord audio corruption protection
-            logger.debug("Applied Discord audio corruption protection")
-
-            # Start recording
-            self.voice_client.start_recording(
-                self.sink,
-                self._handle_audio_finished,
-                *[self.voice_client.guild.get_member(user_id)
-                  for user_id in [m.id for m.id in self.current_channel.members if not m.bot]]
-            )
-
-            logger.debug("Recording started successfully")
-
-            self.is_listening = True
-            logger.debug("Started listening in channel: %s",
-                         self.current_channel.name)
-
-            # CRITICAL FIX: Send user updates after starting to listen
-            await self._send_user_updates()
-
-            return True
-
-        except Exception as e:
-            logger.error("Failed to start listening: %s", str(e))
-            logger.error("Traceback: %s", traceback.format_exc())
-            return False
 
     def _handle_audio_finished(self, sink, *args):
         """Handle audio recording finished event."""
@@ -316,9 +261,9 @@ class VoiceTranslator:
                 logger.info(
                     "✅ Model loading completed (warmup handled by server)")
                 return True
-            else:
-                logger.error("❌ Failed to load models via ModelManager")
-                return False
+
+            logger.error("❌ Failed to load models via ModelManager")
+            return False
         except Exception as e:
             logger.error("Error during model loading: %s", str(e))
             # Check if models were actually loaded despite the error via model manager
@@ -327,9 +272,9 @@ class VoiceTranslator:
                 self.model_loaded = True
                 logger.info("✅ Models loaded successfully despite error")
                 return True
-            else:
-                logger.error("Failed to load models: %s", str(e))
-                return False
+
+            logger.error("Failed to load models: %s", str(e))
+            return False
 
     def setup_voice_receiver(self, voice_client):
         """Set up the voice receiver for a Discord voice client"""
@@ -472,71 +417,6 @@ class VoiceTranslator:
         if self.is_listening:
             return await self.stop_listening(voice_client)
         return await self.start_listening(voice_client)
-
-    async def process_audio_callback(self, user_id, audio_file, message_type=None):
-        """Process audio data and generate translations"""
-        try:
-            logger.debug(
-                "🔄 process_audio_callback called for user %s with message_type: %s", user_id, message_type)
-
-            # If we're called with a message_type, it's a direct text message
-            if message_type is not None:
-                text_content = audio_file
-                logger.info("📝 Received %s for user %s: %s",
-                            message_type, user_id, text_content)
-
-                # Forward to translation callback
-                if self.translation_callback:
-                    await self.translation_callback(user_id, text_content, message_type)
-                else:
-                    logger.warning("No translation callback available")
-                return
-
-            # If we get here, it's an audio file processing request (legacy path)
-            logger.warning(
-                "⚠️ Legacy audio file processing path called - this should not happen in current design")
-            try:
-                import utils
-                # Get current queue size from sink if available for smart routing
-                current_queue_size = 0
-                if hasattr(self, 'sink') and hasattr(self.sink, 'workers'):
-                    current_queue_size = self.sink.workers.queue.qsize()
-
-                # Get transcription and detected language with smart routing
-                transcribed_text, detected_language = await utils.transcribe(
-                    audio_file, current_queue_size=current_queue_size
-                )
-
-                # Skip processing if transcription was empty
-                if not transcribed_text:
-                    return
-
-                # Create transcription message
-                logger.info("Sending transcription for user %s: %s",
-                            user_id, transcribed_text)
-                await self.translation_callback(user_id, transcribed_text, message_type="transcription")
-
-                # Determine if translation is needed
-                needs_translation = await translation.should_translate(transcribed_text, detected_language)
-
-                if needs_translation:
-                    translated_text = await utils.translate(transcribed_text)
-                    if translated_text:
-                        await self.translation_callback(user_id, translated_text, message_type="translation")
-                else:
-                    # Send original text as translation
-                    await self.translation_callback(user_id, transcribed_text, message_type="translation")
-            finally:
-                # Always delete the file when done with it
-                await self._force_delete_file(audio_file)
-
-        except (OSError, RuntimeError, ValueError) as e:
-            logger.error("Error in process_audio_callback: %s", str(e))
-            logger.debug("Process audio callback error traceback: %s",
-                         traceback.format_exc())
-            # Make sure to clean up even if exception occurs
-            if message_type is None:  # Only try to delete if it was an audio file
-                await self._force_delete_file(audio_file)
 
     async def _force_delete_file(self, file_path):
         """Forcefully delete a file with multiple retries."""

@@ -7,7 +7,7 @@ the frontend and the Discord bot.
 import asyncio
 import json
 import traceback
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from fastapi import WebSocket, WebSocketDisconnect
 from logging_config import get_logger
 

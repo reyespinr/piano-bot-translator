@@ -4,7 +4,6 @@ Discord bot management module.
 Handles Discord bot initialization, events, and voice channel operations.
 """
 import asyncio
-import os
 import discord
 from discord.ext import commands
 from logging_config import get_logger

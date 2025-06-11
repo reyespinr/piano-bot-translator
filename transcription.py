@@ -22,9 +22,6 @@ from logging_config import get_logger
 
 logger = get_logger(__name__)
 
-# CRITICAL RESTORATION: Add back the common hallucinations filtering
-# COMMON_HALLUCINATIONS moved to audio_utils.py
-
 
 async def transcribe(audio_file, current_queue_size=0, concurrent_requests=0, active_transcriptions=0):
     """
@@ -125,7 +122,9 @@ def should_use_fast_model(audio_file_path, current_queue_size=0, concurrent_requ
         logger.info("⚡ Concurrent processing (%d active transcriptions), routing short audio (%.1fs) to FAST model pool (%d available)",
                     active_transcriptions, duration, available_fast_models)
         model_manager.update_stats(fast_uses=stats["fast_uses"] + 1)
-        return True    # QUEUE-BASED ROUTING: High queue load - use fast models more aggressively
+        return True
+
+    # QUEUE-BASED ROUTING: High queue load - use fast models more aggressively
     if current_queue_size > 2 and duration < 2.5 and available_fast_models > 0:
         logger.info("🔥 Queue load (%d), routing audio (%.1fs) to FAST model pool (%d available)",
                     current_queue_size, duration, available_fast_models)

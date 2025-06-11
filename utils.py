@@ -5,7 +5,6 @@ This module provides the main interface for transcription and translation
 functionality, now using the unified ModelManager for better organization.
 """
 import asyncio
-import os
 import uuid
 from logging_config import get_logger
 
@@ -43,10 +42,10 @@ async def warm_up_pipeline():
             logger.info("🚀 Total VRAM models loaded: %d models ready for parallel processing",
                         stats["accurate_models"] + stats["fast_models"])
             return True
-        else:
-            logger.warning(
-                "⚠️ Model warm-up had some issues but models should still work")
-            return False
+
+        logger.warning(
+            "⚠️ Model warm-up had some issues but models should still work")
+        return False
 
     except Exception as e:
         logger.error("❌ Model warm-up failed: %s", str(e))

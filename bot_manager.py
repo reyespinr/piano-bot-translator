@@ -42,13 +42,13 @@ class DiscordBotManager:
         async def on_voice_state_update(member, before, after):
             """Handle voice state updates to track users joining/leaving."""
             if member.bot:
+                # CRITICAL DEBUG: Check if websocket handler is available (updated for refactored structure)
                 return
-
-            # CRITICAL DEBUG: Check if websocket handler is available
             websocket_available = (hasattr(self, 'voice_translator') and
                                    self.voice_translator and
-                                   hasattr(self.voice_translator, 'websocket_handler') and
-                                   self.voice_translator.websocket_handler)
+                                   hasattr(self.voice_translator, 'state') and
+                                   hasattr(self.voice_translator.state, 'websocket_handler') and
+                                   self.voice_translator.state.websocket_handler)
 
             logger.debug(
                 "🔍 Voice state update - WebSocket handler available: %s", websocket_available)
@@ -62,29 +62,26 @@ class DiscordBotManager:
             if before.channel is None and after.channel is not None:
                 logger.info("👋 User %s joined voice channel: %s",
                             member.display_name, after.channel.name)
-                user_id = str(member.id)
-
                 # If they joined our channel, enable processing and notify frontend
+                user_id = str(member.id)
                 if bot_voice_channel and after.channel == bot_voice_channel:
                     if user_id not in self.user_processing_enabled:
                         self.user_processing_enabled[user_id] = True
                         logger.info(
                             "🔊 Enabled processing for new user: %s", member.display_name)
 
-                    # Update voice translator's user settings
+                    # Update voice translator's user settings (FIXED: Updated for refactored structure)
                     if self.voice_translator:
-                        self.voice_translator.user_processing_enabled[user_id] = True
+                        self.voice_translator.state.user_processing_enabled[user_id] = True
 
                     user_data = {
                         "id": user_id,
                         "name": member.display_name,
                         "avatar": str(member.avatar.url) if member.avatar else None
-                    }
-
-                    # CRITICAL FIX: Add more detailed debugging for WebSocket broadcast
+                    }                    # CRITICAL FIX: Add more detailed debugging for WebSocket broadcast
                     if websocket_available:
                         try:
-                            await self.voice_translator.websocket_handler.broadcast_user_joined(user_data, True)
+                            await self.voice_translator.state.websocket_handler.broadcast_user_joined(user_data, True)
                             logger.info(
                                 "📡 Notified frontend: user %s joined", member.display_name)
                         except Exception as broadcast_error:
@@ -102,22 +99,21 @@ class DiscordBotManager:
                 user_id = str(member.id)
 
                 # If they left our channel, clean up and notify frontend
+                # Clean up user processing state
                 if bot_voice_channel and before.channel == bot_voice_channel:
-                    # Clean up user processing state
                     if user_id in self.user_processing_enabled:
                         del self.user_processing_enabled[user_id]
                         logger.info(
                             "🔇 Removed processing for user: %s", member.display_name)
 
-                    # Update voice translator's user settings
+                    # Update voice translator's user settings (FIXED: Updated for refactored structure)
                     if (hasattr(self, 'voice_translator') and self.voice_translator):
-                        if user_id in self.voice_translator.user_processing_enabled:
-                            del self.voice_translator.user_processing_enabled[user_id]
-
-                    # CRITICAL FIX: Add more detailed debugging for WebSocket broadcast
+                        if user_id in self.voice_translator.state.user_processing_enabled:
+                            # CRITICAL FIX: Add more detailed debugging for WebSocket broadcast
+                            del self.voice_translator.state.user_processing_enabled[user_id]
                     if websocket_available:
                         try:
-                            await self.voice_translator.websocket_handler.broadcast_user_left(user_id)
+                            await self.voice_translator.state.websocket_handler.broadcast_user_left(user_id)
                             logger.info(
                                 "📡 Notified frontend: user %s left", member.display_name)
                         except Exception as broadcast_error:
@@ -140,17 +136,14 @@ class DiscordBotManager:
                     if user_id in self.user_processing_enabled:
                         del self.user_processing_enabled[user_id]
                         logger.info(
-                            "🔇 Removed processing for user: %s (switched channels)", member.display_name)
-
-                    # Update voice translator's user settings
+                            "🔇 Removed processing for user: %s (switched channels)", member.display_name)                    # Update voice translator's user settings (FIXED: Updated for refactored structure)
                     if (hasattr(self, 'voice_translator') and self.voice_translator):
-                        if user_id in self.voice_translator.user_processing_enabled:
-                            del self.voice_translator.user_processing_enabled[user_id]
+                        if user_id in self.voice_translator.state.user_processing_enabled:
+                            del self.voice_translator.state.user_processing_enabled[user_id]
 
-                    # CRITICAL FIX: Add more detailed debugging for WebSocket broadcast
-                    if websocket_available:
+                    # CRITICAL FIX: Add more detailed debugging for WebSocket broadcast                    if websocket_available:
                         try:
-                            await self.voice_translator.websocket_handler.broadcast_user_left(user_id)
+                            await self.voice_translator.state.websocket_handler.broadcast_user_left(user_id)
                             logger.info(
                                 "📡 Notified frontend: user %s left our channel", member.display_name)
                         except Exception as broadcast_error:
@@ -166,22 +159,18 @@ class DiscordBotManager:
                     if user_id not in self.user_processing_enabled:
                         self.user_processing_enabled[user_id] = True
                         logger.info(
-                            "🔊 Enabled processing for user: %s (switched to our channel)", member.display_name)
-
-                    # Update voice translator's user settings
+                            "🔊 Enabled processing for user: %s (switched to our channel)", member.display_name)                    # Update voice translator's user settings (FIXED: Updated for refactored structure)
                     if self.voice_translator:
-                        self.voice_translator.user_processing_enabled[user_id] = True
+                        self.voice_translator.state.user_processing_enabled[user_id] = True
 
                     user_data = {
                         "id": user_id,
                         "name": member.display_name,
                         "avatar": str(member.avatar.url) if member.avatar else None
-                    }
-
-                    # CRITICAL FIX: Add more detailed debugging for WebSocket broadcast
+                    }                    # CRITICAL FIX: Add more detailed debugging for WebSocket broadcast
                     if websocket_available:
                         try:
-                            await self.voice_translator.websocket_handler.broadcast_user_joined(user_data, True)
+                            await self.voice_translator.state.websocket_handler.broadcast_user_joined(user_data, True)
                             logger.info(
                                 "📡 Notified frontend: user %s joined our channel", member.display_name)
                         except Exception as broadcast_error:
@@ -291,14 +280,13 @@ class DiscordBotManager:
         try:
             channel = self.bot.get_channel(int(channel_id))
             if not channel:
+                # Leave current channel if connected
                 return False, "Channel not found"
-
-            # Leave current channel if connected
             if self.bot.voice_clients:
-                # Stop listening if active
+                # Stop listening if active (FIXED: Updated for refactored structure)
                 if (self.voice_translator and
-                    hasattr(self.voice_translator, 'is_listening') and
-                        self.voice_translator.is_listening):
+                    hasattr(self.voice_translator, 'state') and
+                        self.voice_translator.state.is_listening):
                     await self.voice_translator.stop_listening(self.bot.voice_clients[0])
 
                 await self.bot.voice_clients[0].disconnect()
@@ -306,9 +294,9 @@ class DiscordBotManager:
             # Join new channel
             voice_client = await channel.connect()
 
-            # Store current channel in voice translator
+            # Store current channel in voice translator (FIXED: Updated for refactored structure)
             if self.voice_translator:
-                self.voice_translator.current_channel = channel
+                self.voice_translator.state.current_channel = channel
 
             # CRITICAL FIX: Add a small delay to ensure Discord updates member list
             await asyncio.sleep(0.5)
@@ -357,11 +345,10 @@ class DiscordBotManager:
                     users_to_remove.append(user_id)
 
             for user_id in users_to_remove:
+                # Update voice translator's user settings (FIXED: Updated for refactored structure)
                 del self.user_processing_enabled[user_id]
-
-            # Update voice translator's user settings
             if self.voice_translator:
-                self.voice_translator.user_processing_enabled = self.user_processing_enabled.copy()
+                self.voice_translator.state.user_processing_enabled = self.user_processing_enabled.copy()
 
             logger.info("🔊 Processing enabled for %d users: %s",
                         len(self.user_processing_enabled),
@@ -390,18 +377,17 @@ class DiscordBotManager:
         if not self.bot.voice_clients:
             return False, "Not connected to a voice channel", False
 
-        voice_client = self.bot.voice_clients[0]
-
         # Create fresh copy of processing settings
+        voice_client = self.bot.voice_clients[0]
         string_user_processing_enabled = {}
         for user_id, enabled in self.user_processing_enabled.items():
             string_user_processing_enabled[str(user_id)] = enabled
 
-        # Set in the translator
-        self.voice_translator.user_processing_enabled = string_user_processing_enabled.copy()
+        # Set in the translator state (FIXED: Updated for refactored structure)
+        self.voice_translator.state.user_processing_enabled = string_user_processing_enabled.copy()
 
         success, message = await self.voice_translator.toggle_listening(voice_client)
-        return success, message, self.voice_translator.is_listening
+        return success, message, self.voice_translator.state.is_listening
 
     def get_connected_users(self):
         """Get list of users connected to the current voice channel."""

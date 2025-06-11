@@ -78,17 +78,16 @@ async def lifespan(app: FastAPI):
 
         # Set voice translator in bot manager
         bot_manager.set_voice_translator(voice_translator)
+        # CRITICAL FIX: Verify the connection chain (updated for refactored structure)
         logger.info("🔗 Voice translator connected to bot manager")
-
-        # CRITICAL FIX: Verify the connection chain
         if (hasattr(bot_manager, 'voice_translator') and
             bot_manager.voice_translator and
-            hasattr(bot_manager.voice_translator, 'websocket_handler') and
-                bot_manager.voice_translator.websocket_handler):
+            hasattr(bot_manager.voice_translator, 'state') and
+            hasattr(bot_manager.voice_translator.state, 'websocket_handler') and
+                bot_manager.voice_translator.state.websocket_handler):
             logger.info(
-                "✅ Connection chain verified: bot_manager -> voice_translator -> websocket_handler")
+                "✅ Connection chain verified: bot_manager -> voice_translator -> state -> websocket_handler")
         else:
-            # Create Discord bot
             logger.error("❌ Connection chain BROKEN!")
         bot = bot_manager.create_bot(translation_callback)
 

@@ -6,7 +6,7 @@ Whisper models with YAML configuration support. Follows the "composition over in
 principle with clean separation of concerns.
 """
 import threading
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Tuple, Any
 from config_manager import get_config
 from model_core import ModelTier, ModelLoader, ModelWarmup, ModelSelector, StatsManager
 from logging_config import get_logger
@@ -137,7 +137,7 @@ class ModelManager:
 
     def get_models(self) -> Tuple[Any, List[Any]]:
         """
-        Get models for backward compatibility.
+        Get models for current usage.
 
         Returns:
             Tuple of (accurate_model, fast_model_pool)
@@ -218,166 +218,5 @@ class ModelManager:
             return False
 
 
-class DynamicStats:
-    """A dictionary-like object that dynamically fetches stats."""
-
-    def __init__(self, model_manager):
-        self.model_manager = model_manager
-
-    def __getitem__(self, key):
-        """Allow dictionary-style access."""
-        stats = self.model_manager.get_stats()
-
-        # Map old keys to new stats structure
-        legacy_mapping = {
-            "models_loaded": "models_loaded",
-            "models_warmed": "models_warmed",
-            "concurrent_requests": "concurrent_requests",
-            "active_transcriptions": "active_transcriptions",
-            "accurate_uses": "accurate_uses",
-            "fast_uses": "fast_uses",
-            "queue_overflows": "queue_overflows",
-            "accurate_busy": "accurate_busy",
-            "fast_models_busy": lambda: False,  # Legacy field
-            "stats_lock": lambda: self.model_manager.stats_manager.stats_lock,
-            "accurate_model_lock": lambda: self.model_manager.accurate_tier.locks[0] if self.model_manager.accurate_tier.locks else None,
-            "fast_model_locks": lambda: self.model_manager.fast_tier.locks.copy(),
-            "fast_model_usage": "fast_usage"
-        }
-
-        if key in legacy_mapping:
-            value = legacy_mapping[key]
-            if callable(value):
-                return value()
-            elif isinstance(value, str):
-                return stats.get(value)
-            else:
-                return value
-        else:
-            raise KeyError(f"Unknown key: {key}")
-
-    def get(self, key, default=None):
-        """Dictionary-style get method."""
-        try:
-            return self[key]
-        except KeyError:
-            return default
-
-
-class LegacyCompat:
-    """Provides backward compatibility with the old model manager interface."""
-
-    def __init__(self, model_manager: ModelManager):
-        """Initialize legacy compatibility layer."""
-        self.model_manager = model_manager
-
-    @property
-    def MODEL_USAGE_STATS(self) -> Dict[str, Any]:
-        """Legacy stats structure for backward compatibility."""
-        stats = self.model_manager.get_stats()
-
-        legacy_stats = {
-            "stats_lock": self.model_manager.stats_manager.stats_lock,
-            "concurrent_requests": stats["concurrent_requests"],
-            "active_transcriptions": stats["active_transcriptions"],
-            "accurate_busy": stats["accurate_busy"],
-            "fast_models_busy": False,  # Legacy field
-            "accurate_model_lock": None,
-            "fast_model_locks": [],
-            "fast_model_usage": stats["fast_usage"],
-            "fast_uses": stats["fast_uses"],
-            "accurate_uses": stats["accurate_uses"],
-            "queue_overflows": stats["queue_overflows"]
-        }
-
-        # Update model references if loaded
-        if self.model_manager.accurate_tier.locks:
-            legacy_stats["accurate_model_lock"] = self.model_manager.accurate_tier.locks[0]
-
-        legacy_stats["fast_model_locks"] = self.model_manager.fast_tier.locks.copy()
-
-        return legacy_stats
-
-    def update_legacy_stats(self):
-        """Update legacy stats structure for backward compatibility."""
-        # This method exists for compatibility but stats are now always current
-        pass
-
-    @property
-    def MODEL_ACCURATE_NAME(self) -> str:
-        """Legacy accurate model name property."""
-        return self.model_manager.accurate_tier.config.name
-
-    @property
-    def MODEL_FAST_NAME(self) -> str:
-        """Legacy fast model name property."""
-        return self.model_manager.fast_tier.config.name
-
-    @property
-    def MODEL_FAST_POOL_SIZE(self) -> int:
-        """Legacy fast pool size property."""
-        return self.model_manager.fast_tier.config.count
-
-
 # Global model manager instance
 model_manager = ModelManager()
-legacy_compat = LegacyCompat(model_manager)
-
-
-# Backward compatibility functions
-def load_models_if_needed():
-    """Legacy function for backward compatibility."""
-    if not model_manager.stats_manager.stats["models_loaded"]:
-        logger.warning(
-            "Models not loaded via ModelManager! Loading synchronously...")
-        # This is a fallback - ideally should use async initialize_models()
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                logger.error(
-                    "Cannot load models synchronously in async context!")
-                return None, []
-            else:
-                success = loop.run_until_complete(
-                    model_manager.initialize_models(warm_up=False))
-                if not success:
-                    return None, []
-        except Exception as e:
-            logger.error("Failed to load models: %s", str(e))
-            return None, []
-
-    return model_manager.get_models()
-
-
-def select_fast_model():
-    """Legacy function for backward compatibility."""
-    _, _, index = model_manager.select_fast_model()
-    return index
-
-
-def get_available_fast_model():
-    """Legacy function for backward compatibility."""
-    return model_manager.select_fast_model()
-
-
-def release_fast_model(model_index):
-    """Legacy function for backward compatibility."""
-    model_manager.release_fast_model(model_index)
-
-
-def count_available_fast_models():
-    """Legacy function for backward compatibility."""
-    return model_manager.count_available_fast_models()
-
-
-# Export legacy constants and stats structure
-MODEL_USAGE_STATS = DynamicStats(model_manager)
-MODEL_ACCURATE_NAME = legacy_compat.MODEL_ACCURATE_NAME
-MODEL_FAST_NAME = legacy_compat.MODEL_FAST_NAME
-MODEL_FAST_POOL_SIZE = legacy_compat.MODEL_FAST_POOL_SIZE
-
-
-def update_legacy_stats():
-    """Update legacy stats structure for backward compatibility."""
-    legacy_compat.update_legacy_stats()

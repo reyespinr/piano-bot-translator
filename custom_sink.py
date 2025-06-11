@@ -6,6 +6,9 @@ for real-time speech detection, transcription, and translation. It coordinates
 between specialized components for audio processing, worker management,
 session tracking, and voice activity detection.
 
+REFACTORED: Large methods have been broken down into modular components
+in custom_sink_core.py for better maintainability and testing.
+
 Features:
 - Modular architecture with separated concerns
 - Real-time speech detection and processing
@@ -15,18 +18,27 @@ Features:
 """
 import asyncio
 import os
-import time
-import threading
 import subprocess
+import threading
+import time
 from typing import Optional, Callable, Awaitable
 from discord.sinks import WaveSink
 
-# Import our specialized components
-from audio_worker_manager import AudioWorkerManager
-from audio_session_manager import AudioSession
-from voice_activity_detector import VoiceActivityDetector
-from audio_buffer_manager import AudioBufferManager
 import utils
+
+from custom_sink_core import (
+    AudioSinkState,
+    AudioSinkInitializer,
+    UserProcessingChecker,
+    AudioDataValidator,
+    SpeechActivityProcessor,
+    SilencePauseHandler,
+    AudioBufferProcessor,
+    TranscriptionProcessor,
+    QueueMonitor,
+    GUIUpdateManager,
+    SinkCleanupManager
+)
 from logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -39,6 +51,9 @@ class RealTimeWaveSink(WaveSink):
     transcription and translation capabilities. It coordinates between specialized
     components to process incoming audio packets, detect speech activity, and 
     manage the workflow of converting speech to text.
+
+    REFACTORED: Complex methods have been broken down into modular components
+    for better maintainability and testing.
 
     Features:
     - Automatic speech detection using combined VAD methods
@@ -61,30 +76,52 @@ class RealTimeWaveSink(WaveSink):
     def __init__(self, *args, pause_threshold=1.0, event_loop=None, num_workers=6, **kwargs):
         super().__init__(*args, **kwargs)
 
-        # Initialize components using composition
-        self.worker_manager = AudioWorkerManager(num_workers, event_loop)
-        self.session = AudioSession()
-        self.vad = VoiceActivityDetector()
-        self.buffer_manager = AudioBufferManager()
+        # Initialize state
+        self.state = AudioSinkState(
+            pause_threshold=pause_threshold,
+            silence_threshold=10
+        )
 
-        # Simple configuration
-        self.pause_threshold = pause_threshold
-        self.silence_threshold = 10
-
-        # Parent reference and callback
-        self.parent = None
-        self.translation_callback: Optional[Callable[...,
-                                                     Awaitable[None]]] = None
-
-        # Add tracking for last log time to prevent log spam
-        self.last_block_log_time = {}
+        # Initialize components using the new modular approach
+        self.worker_manager, self.session, self.vad, self.buffer_manager = AudioSinkInitializer.initialize_components(
+            num_workers, event_loop
+        )
 
         # Set up worker callback and start components
-        self.worker_manager.set_transcription_callback(self.transcribe_audio)
-        self.worker_manager.start_workers()
+        AudioSinkInitializer.setup_worker_callback(
+            self.worker_manager, self.transcribe_audio)
 
         # Start the timer to check for inactive speakers
-        self._start_processing_timer()
+        AudioSinkInitializer.start_processing_timer(
+            self.worker_manager, self._check_inactive_speakers)
+
+    def _should_process_user(self, user, data):
+        """Check if user should be processed based on enabled state."""
+        return UserProcessingChecker.should_process_user(self.state, user, data)
+
+    def _get_voice_client(self):
+        """Get voice client from parent if available."""
+        return UserProcessingChecker.get_voice_client(self.state)
+
+    @property
+    def parent(self):
+        """Get parent reference."""
+        return self.state.parent
+
+    @parent.setter
+    def parent(self, value):
+        """Set parent reference."""
+        self.state.parent = value
+
+    @property
+    def translation_callback(self):
+        """Get translation callback."""
+        return self.state.translation_callback
+
+    @translation_callback.setter
+    def translation_callback(self, value):
+        """Set translation callback."""
+        self.state.translation_callback = value
 
     def _start_processing_timer(self):
         """Start the timer to check for inactive speakers."""
@@ -162,28 +199,26 @@ class RealTimeWaveSink(WaveSink):
                 self._process_silent_speech(user)
 
             # Handle long pauses
-            if time_diff > 2.0:  # 2.0 seconds
-                # Add rate limiting to prevent log spam
+            if time_diff > 2.0:  # 2.0 seconds                # Add rate limiting to prevent log spam
                 now = time.time()
-                last_log_time = self.last_block_log_time.get(user, 0)
+                last_log_time = self.state.last_block_log_time.get(user, 0)
                 if now - last_log_time > 5.0:  # Only log once every 5 seconds per user
                     logger.debug(
                         "Long pause detected for user %s. Processing any speech and resetting.", user)
-                    self.last_block_log_time[user] = now
+                    self.state.last_block_log_time[user] = now
 
                 should_process = self.buffer_manager.process_long_pause(user)
                 if should_process:
                     self.process_speech_buffer(user)
 
             # Update pre-speech buffer
-            self.buffer_manager.update_pre_speech_buffer(user, data)
-
-            # Handle active speech or silence
+            self.buffer_manager.update_pre_speech_buffer(
+                user, data)            # Handle active speech or silence
             if is_active:
                 self.buffer_manager.handle_active_speech(user, data)
             else:
                 should_process = self.buffer_manager.handle_silence(
-                    user, data, self.silence_threshold)
+                    user, data, self.state.silence_threshold)
                 if should_process:
                     logger.debug(
                         "Speech ended for user %s. Processing audio.", user)

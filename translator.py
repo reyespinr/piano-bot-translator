@@ -4,43 +4,40 @@ Voice translation module for Discord bot.
 This module provides real-time voice transcription and translation capabilities
 for Discord voice channels. It handles audio processing, language detection,
 transcription, and translation using machine learning models.
+
+REFACTORED: Large methods have been broken down into modular components
+in translator_core.py for better maintainability and testing.
 """
 import asyncio
-import os
-import struct
-import sys
-import gc
-import subprocess
 from typing import Callable
-from custom_sink import RealTimeWaveSink
+
+from translator_core import (
+    VoiceTranslatorState,
+    AudioSinkSetup,
+    DiscordAudioProtection,
+    AudioRecordingManager,
+    SinkCleanupManager,
+    ModelManager,
+    FileCleanupManager,
+    UserStateManager,
+    WebSocketBroadcaster,
+    VoiceStateUpdateHandler
+)
 from logging_config import get_logger
 
 logger = get_logger(__name__)
-
-# Constants for cleanup and deletion
-CLEANUP_DELAY = 0.5
-MAX_DELETE_RETRIES = 3
 
 
 class VoiceTranslator:
     """Voice translation manager for Discord bot."""
 
     def __init__(self, translation_callback: Callable = None):
-        self.translation_callback = translation_callback
-        self.websocket_handler = None
-        self.voice_client = None
-        self.sink = None
-        self.is_listening = False
-        self.user_processing_enabled = {}  # Track which users have processing enabled
-        self.active_voices = {}  # Track active voice states
-        self.connected_users = {}  # Track connected users
-        self.current_channel = None  # CRITICAL FIX: Add missing attribute
-        self.model_loaded = False  # CRITICAL FIX: Add missing attribute
+        self.state = VoiceTranslatorState(translation_callback=translation_callback)
         logger.info("✅ VoiceTranslator initialized")
 
     def set_websocket_handler(self, handler):
         """Set the WebSocket handler for sending user updates."""
-        self.websocket_handler = handler
+        self.state.websocket_handler = handler
 
     async def join_voice_channel(self, channel):
         """Join a voice channel and set up audio processing."""
@@ -48,77 +45,25 @@ class VoiceTranslator:
             logger.info("Joining voice channel: %s", channel.name)
 
             # Join the voice channel
-            self.voice_client = await channel.connect()
-            self.current_channel = channel
+            self.state.voice_client = await channel.connect()
+            self.state.current_channel = channel
 
             # Initialize user processing states for current members
-            self._initialize_user_states()
+            self.state.user_processing_enabled, self.state.connected_users = UserStateManager.initialize_user_states(channel)
 
             # Send user list to WebSocket clients
-            if self.websocket_handler:
-                await self._send_user_updates()
+            await UserStateManager.send_user_updates(
+                self.state.websocket_handler, 
+                self.state.current_channel, 
+                self.state.user_processing_enabled
+            )
 
-            logger.info(
-                "✅ Successfully joined voice channel: %s", channel.name)
+            logger.info("✅ Successfully joined voice channel: %s", channel.name)
             return True
 
         except Exception as e:
-            logger.error("Failed to join voice channel %s: %s",
-                         channel.name, str(e))
+            logger.error("Failed to join voice channel %s: %s", channel.name, str(e))
             return False
-
-    def _initialize_user_states(self):
-        """Initialize processing states for users currently in the voice channel."""
-        if not self.current_channel:
-            return
-
-        # Clear existing states
-        self.user_processing_enabled.clear()
-        self.connected_users.clear()
-
-        # Set all current members to enabled by default
-        for member in self.current_channel.members:
-            if not member.bot:  # Exclude bots
-                user_id_str = str(member.id)
-                self.user_processing_enabled[user_id_str] = True
-                self.connected_users[user_id_str] = {
-                    'id': user_id_str,
-                    'name': member.display_name
-                }
-                logger.debug("Initialized user %s (%s) as enabled",
-                             member.display_name, member.id)
-
-    async def _send_user_updates(self):
-        """Send current user list and states to WebSocket clients."""
-        if not self.websocket_handler or not self.current_channel:
-            logger.warning(
-                "No websocket handler or current channel available for user updates")
-            return
-
-        users = []
-        for member in self.current_channel.members:
-            if not member.bot:  # Exclude bots
-                user_id_str = str(member.id)
-                users.append({
-                    'id': user_id_str,
-                    'name': member.display_name,
-                    'avatar': str(member.avatar.url) if member.avatar else None
-                })
-                # Ensure user is in processing states
-                if user_id_str not in self.user_processing_enabled:
-                    self.user_processing_enabled[user_id_str] = True
-
-        # Send users update
-        try:
-            await self.websocket_handler.broadcast_message({
-                'type': 'users_update',
-                'users': users,
-                'enabled_states': self.user_processing_enabled.copy()
-            })
-            logger.info(
-                "Sent user updates: %d users with processing states", len(users))
-        except Exception as e:
-            logger.error("Failed to send user updates: %s", str(e))
 
     def _handle_audio_finished(self, sink, *args):
         """Handle audio recording finished event."""
@@ -127,69 +72,35 @@ class VoiceTranslator:
     async def process_audio_callback(self, user_id, text, message_type):
         """Process audio transcription/translation callback."""
         try:
-            logger.debug(
-                "🔄 process_audio_callback called for user %s with message_type: %s", user_id, message_type)
+            logger.debug("🔄 process_audio_callback called for user %s with message_type: %s", user_id, message_type)
 
             if message_type == "transcription":
-                logger.info(
-                    "📝 Received transcription for user %s: %s", user_id, text)
-                # Send to WebSocket clients
-                if self.websocket_handler:
-                    await self.websocket_handler.broadcast_translation(user_id, text, "transcription")
+                logger.info("📝 Received transcription for user %s: %s", user_id, text)
+                await WebSocketBroadcaster.broadcast_translation(self.state.websocket_handler, user_id, text, "transcription")
 
             elif message_type == "translation":
-                logger.info(
-                    "🌍 Received translation for user %s: %s", user_id, text)
-                # Send translation to WebSocket clients
-                if self.websocket_handler:
-                    await self.websocket_handler.broadcast_translation(user_id, text, "translation")
-                    logger.debug(
-                        "✅ Translation message sent to WebSocket clients")
-                else:
-                    logger.warning(
-                        "❌ No websocket_handler available for translation")
+                logger.info("🌍 Received translation for user %s: %s", user_id, text)
+                await WebSocketBroadcaster.broadcast_translation(self.state.websocket_handler, user_id, text, "translation")
 
         except Exception as e:
             logger.error("Error in process_audio_callback: %s", str(e))
 
     async def _get_user_display_name(self, user_id):
         """Get user display name from Discord bot - simplified version."""
-        try:
-            if self.current_channel:
-                # Try to find user in current voice channel first
-                for member in self.current_channel.members:
-                    if str(member.id) == str(user_id):
-                        return member.display_name
-        except Exception as e:
-            logger.debug("Error getting user display name: %s", str(e))
-
-        # Fallback to generic name if we can't resolve it
-        return f"User {user_id}"
+        return UserStateManager.get_user_display_name(self.state.current_channel, user_id)
 
     async def toggle_user_processing(self, user_id, enabled):
         """Toggle processing for a specific user."""
         try:
             user_id_str = str(user_id)
-            self.user_processing_enabled[user_id_str] = enabled
+            self.state.user_processing_enabled[user_id_str] = enabled
 
             # Get user info for logging
-            if self.current_channel:
-                member = self.current_channel.guild.get_member(int(user_id))
-                user_name = member.display_name if member else f"User {user_id}"
-            else:
-                user_name = f"User {user_id}"
-
-            logger.info("User processing %s for %s (%s)",
-                        "enabled" if enabled else "disabled", user_name, user_id)
+            user_name = UserStateManager.get_user_display_name(self.state.current_channel, user_id)
+            logger.info("User processing %s for %s (%s)", "enabled" if enabled else "disabled", user_name, user_id)
 
             # Send update to WebSocket clients
-            if self.websocket_handler:
-                await self.websocket_handler.broadcast_message({
-                    'type': 'user_toggle',
-                    'user_id': user_id_str,
-                    'enabled': enabled
-                })
-
+            await WebSocketBroadcaster.broadcast_user_toggle(self.state.websocket_handler, user_id_str, enabled)
             return True
 
         except Exception as e:
@@ -199,88 +110,44 @@ class VoiceTranslator:
     async def handle_voice_state_update(self, member, before, after):
         """Handle voice state updates (users joining/leaving)."""
         try:
-            if not self.current_channel:
+            if not self.state.current_channel:
                 return
 
             # Check if the update is for our current channel
-            if (before.channel == self.current_channel or
-                    after.channel == self.current_channel):
-
+            if self.state.current_channel in (before.channel, after.channel):
                 if member.bot:  # Ignore bots
                     return
 
-                user_id_str = str(member.id)
-
                 # User joined our channel
-                if after.channel == self.current_channel and before.channel != self.current_channel:
-                    # Enable processing by default for new users
-                    self.user_processing_enabled[user_id_str] = True
-                    logger.info("👋 User %s joined voice channel",
-                                member.display_name)
-
-                    # Send user joined update
-                    if self.websocket_handler:
-                        user_data = {
-                            "id": user_id_str,
-                            "name": member.display_name,
-                            "avatar": str(member.avatar.url) if member.avatar else None
-                        }
-                        await self.websocket_handler.broadcast_user_joined(user_data, True)
+                if after.channel == self.state.current_channel and before.channel != self.state.current_channel:
+                    await VoiceStateUpdateHandler.handle_user_joined(
+                        member, self.state.current_channel, 
+                        self.state.user_processing_enabled, self.state.websocket_handler
+                    )
 
                 # User left our channel
-                elif before.channel == self.current_channel and after.channel != self.current_channel:
-                    # Remove from processing states
-                    self.user_processing_enabled.pop(user_id_str, None)
-                    logger.info("👋 User %s left voice channel",
-                                member.display_name)
-
-                    # Send user left update
-                    if self.websocket_handler:
-                        await self.websocket_handler.broadcast_user_left(user_id_str)
+                elif before.channel == self.state.current_channel and after.channel != self.state.current_channel:
+                    await VoiceStateUpdateHandler.handle_user_left(
+                        member, self.state.user_processing_enabled, self.state.websocket_handler
+                    )
 
         except Exception as e:
             logger.error("Error handling voice state update: %s", str(e))
 
     async def load_models(self):
         """Verify model loading capabilities and warm up models with timeout protection"""
-        try:
-            logger.info("Loading translation models...")
-            from model_manager import model_manager
-
-            # Check if models are already loaded via model manager
-            if model_manager.stats["models_loaded"]:
-                logger.info("✅ Models already loaded via ModelManager")
-                self.model_loaded = True
-                return True
-
-            # Initialize models via model manager
-            success = await model_manager.initialize_models(warm_up=False)
-            if success:
-                self.model_loaded = True
-                logger.info("✅ Models loaded successfully via ModelManager")
-                logger.info(
-                    "✅ Model loading completed (warmup handled by server)")
-                return True
-
-            logger.error("❌ Failed to load models via ModelManager")
-            return False
-        except Exception as e:
-            logger.error("Error during model loading: %s", str(e))
-            # Check if models were actually loaded despite the error via model manager
-            from model_manager import model_manager
-            if model_manager.stats["models_loaded"]:
-                self.model_loaded = True
-                logger.info("✅ Models loaded successfully despite error")
-                return True
-
-            logger.error("Failed to load models: %s", str(e))
-            return False
+        success, message = await ModelManager.load_models()
+        self.state.model_loaded = success
+        logger.info("Model loading result: %s - %s", "SUCCESS" if success else "FAILED", message)
+        return success
 
     def setup_voice_receiver(self, voice_client):
         """Set up the voice receiver for a Discord voice client"""
-        if not self.model_loaded:
-            logger.warning("Models not loaded yet!")        # Store the voice client for later use
-        self.active_voices[voice_client.guild.id] = voice_client
+        if not self.state.model_loaded:
+            logger.warning("Models not loaded yet!")
+        
+        # Store the voice client for later use
+        self.state.active_voices[voice_client.guild.id] = voice_client
 
     async def start_listening(self, voice_client):
         """Start listening and processing audio"""
@@ -288,219 +155,115 @@ class VoiceTranslator:
             return False, "Not connected to a voice channel"
 
         # If already listening, stop first to avoid conflicts
-        if self.is_listening:
+        if self.state.is_listening:
             logger.info("Already listening - stopping first to avoid state conflicts")
             await self.stop_listening(voice_client)
 
         try:
             # Create sink for real-time audio processing
-            logger.info("Creating voice processing sink...")
-            self.sink = RealTimeWaveSink(
-                pause_threshold=1.0,
-                event_loop=asyncio.get_event_loop()
-            )
+            self.state.sink = AudioSinkSetup.create_sink(asyncio.get_event_loop())
+            
+            # Configure sink
+            AudioSinkSetup.configure_sink_callback(self.state.sink, self.process_audio_callback)
+            AudioSinkSetup.setup_user_processing(self.state.sink, self.state.user_processing_enabled)
+            AudioSinkSetup.fallback_setup(self.state.sink, voice_client)
 
-            # Set the translation callback on the sink
-            self.sink.translation_callback = self.process_audio_callback
+            # Create robust audio callback
+            audio_callback = DiscordAudioProtection.create_audio_callback()
 
-            # Set parent reference to access user_processing_enabled dictionary
-            if hasattr(self, 'user_processing_enabled'):
-                self.sink.parent = type('obj', (object,), {})()
-                processing_settings = {}
-                for k, v in self.user_processing_enabled.items():
-                    processing_settings[str(k)] = bool(v)
+            # Apply Discord audio protection
+            DiscordAudioProtection.patch_audio_unpack(voice_client)
 
-                self.sink.parent.user_processing_enabled = processing_settings
-                settings_items = [f"{k}={v}" for k,
-                                  v in processing_settings.items()]
-                settings_str = ', '.join(settings_items)
-                logger.debug("Active user settings: %s", settings_str)
-            elif hasattr(voice_client, 'guild') and voice_client.guild:
-                # Try to import from server module as a fallback
-                try:
-                    if 'server' in sys.modules:
-                        server_module = sys.modules['server']
-                    else:
-                        import server as server_module
+            # Start recording
+            success, message = await AudioRecordingManager.start_recording(voice_client, self.state.sink, audio_callback)
+            if not success:
+                return False, message
 
-                    if hasattr(server_module, 'user_processing_enabled'):
-                        self.sink.parent = server_module
-                except ImportError:
-                    logger.debug("Could not import server module")
-
-            # Create a robust audio callback that handles Discord.py crashes
-            def audio_callback(_sink, *args):
-                async def robust_process():
-                    try:
-                        logger.debug("Audio callback executed successfully")
-                    except Exception as e:
-                        logger.error("Error in audio callback: %s", str(e))
-                    return
-                return robust_process()
-
-            # Monkey patch Discord's voice client to handle decryption errors
-            original_unpack_audio = voice_client.unpack_audio
-
-            def safe_unpack_audio(data):
-                try:
-                    return original_unpack_audio(data)
-                except (IndexError, struct.error, ValueError, TypeError, AttributeError) as e:
-                    logger.warning(
-                        "Discord audio packet corruption (ignoring): %s", str(e))
-                    return
-                except Exception as e:
-                    logger.error(
-                        "Unexpected Discord audio error (ignoring): %s", str(e))
-                    return
-
-            # Apply the patch
-            voice_client.unpack_audio = safe_unpack_audio
-            logger.debug("Applied Discord audio corruption protection")
-
-            # Start recording with our bullet-proof callback
-            voice_client.start_recording(self.sink, audio_callback)
-            logger.debug("Recording started successfully")
-
-            self.is_listening = True
-            logger.debug("Started listening in channel: %s",
-                         voice_client.channel.name)
+            self.state.is_listening = True
+            logger.debug("Started listening in channel: %s", voice_client.channel.name)
 
             # Broadcast listening status to all clients
-            if self.websocket_handler:
-                await self.websocket_handler.broadcast_listen_status(True)
+            await WebSocketBroadcaster.broadcast_listen_status(self.state.websocket_handler, True)
 
             return True, "Started listening"
-        except (ConnectionError, AttributeError, ValueError) as e:
+            
+        except Exception as e:
             logger.error("Error in start_listening: %s", str(e))
             return False, f"Error: {str(e)}"
 
     async def stop_listening(self, voice_client):
         """Stop listening and processing audio"""
-        logger.debug("stop_listening called. Voice client valid: %s",
-                     voice_client is not None)
+        logger.debug("stop_listening called. Voice client valid: %s", voice_client is not None)
         if not voice_client:
             logger.debug("Voice client is None, returning")
             return False, "Not connected to a voice channel"
 
         try:
-            # Stop recording - handle the case where we're not actually recording
-            logger.debug("Stopping recording")
-            try:
-                voice_client.stop_recording()
-                logger.debug("Recording stopped successfully")
-            except Exception as recording_error:
-                # Handle Discord.py "Not currently recording audio" error gracefully
-                error_msg = str(recording_error)
-                if "Not currently recording audio" in error_msg:
-                    logger.info("Voice client was not recording - this is expected after navigation/reconnection")
-                else:
-                    logger.warning("Unexpected error stopping recording: %s", error_msg)
-                # Continue with cleanup regardless of recording state
+            # Stop recording with graceful error handling
+            success, message = await AudioRecordingManager.stop_recording(voice_client)
+            if not success and "Recording was already stopped" not in message:
+                logger.warning("Recording stop issue: %s", message)
 
-            # Add a small delay to ensure workers can complete
-            logger.debug("Waiting for workers to finish...")
-            await asyncio.sleep(CLEANUP_DELAY)
+            # Wait for workers to finish
+            await SinkCleanupManager.wait_for_workers()
 
             # Clean up sink resources
-            if self.sink:
-                try:
-                    logger.debug("Cleaning up sink")
-                    self.sink.cleanup()
-                    logger.debug("Sink cleanup completed")
-                except (AttributeError, RuntimeError) as e:
-                    logger.error("Error during sink cleanup: %s", str(e))
-                self.sink = None
-                logger.debug("Sink reference cleared")
+            await SinkCleanupManager.cleanup_sink(self.state.sink)
+            self.state.sink = None
 
-            self.is_listening = False
+            self.state.is_listening = False
             logger.debug("Stopped listening")
 
             # Broadcast listening status to all clients
-            if self.websocket_handler:
-                await self.websocket_handler.broadcast_listen_status(False)
+            await WebSocketBroadcaster.broadcast_listen_status(self.state.websocket_handler, False)
 
             return True, "Stopped listening"
-        except (ConnectionError, AttributeError) as e:
+            
+        except Exception as e:
             logger.error("Error in stop_listening: %s", str(e))
             return False, f"Error: {str(e)}"
 
     async def toggle_listening(self, voice_client):
         """Toggle listening on/off"""
-        if self.is_listening:
+        if self.state.is_listening:
             return await self.stop_listening(voice_client)
         return await self.start_listening(voice_client)
 
     async def _force_delete_file(self, file_path):
         """Forcefully delete a file with multiple retries."""
-        if not file_path or not os.path.exists(file_path):
-            return False
-
-        # Try to delete the file with multiple retries
-        for attempt in range(MAX_DELETE_RETRIES):
-            try:
-                # Force garbage collection to release file handles
-                gc.collect()
-
-                # Delete and verify
-                os.remove(file_path)
-                logger.debug("Deleted file: %s", os.path.basename(file_path))
-
-                if not os.path.exists(file_path):
-                    return True
-
-                logger.warning(
-                    "File still exists after deletion attempt: %s", file_path)
-            except (PermissionError, OSError) as e:
-                logger.warning("Deletion attempt %d failed: %s",
-                               attempt+1, str(e))
-                await asyncio.sleep(0.5)  # Wait before retry
-
-        # Last resort: try with Windows-specific commands
-        if os.name == 'nt':
-            try:
-                subprocess.run(f'del /F "{file_path}"',
-                               shell=True, check=False)
-                logger.debug(
-                    "Attempted deletion with Windows command: %s", file_path)
-                return not os.path.exists(file_path)
-            except (OSError, subprocess.SubprocessError) as e:
-                logger.error("Windows command deletion failed: %s", str(e))
-
-        logger.warning(
-            "Failed to delete file after multiple attempts: %s", file_path)
-        return False
+        return await FileCleanupManager.force_delete_file(file_path)
 
     def _cleanup_audio_file(self, audio_file):
         """Legacy method for compatibility - use _force_delete_file instead."""
-        if audio_file and os.path.exists(audio_file):
+        if audio_file:
             asyncio.create_task(self._force_delete_file(audio_file))
 
     def cleanup(self):
         """Clean up resources"""
-        # Stop all recordings
-        for guild_id, voice_client in list(self.active_voices.items()):
-            try:
-                if voice_client.is_connected():
-                    asyncio.create_task(self.stop_listening(voice_client))
-            except (AttributeError, ConnectionError) as e:
-                logger.error(
-                    "Error during cleanup for guild %s: %s", guild_id, str(e))
-
-        # Clean up sink
-        if self.sink:
-            self.sink.cleanup()
-            self.sink = None
-
-        self.active_voices = {}
-        self.is_listening = False
-
         try:
-            if hasattr(self, 'active_voices'):
-                self.active_voices.clear()
-            if hasattr(self, 'connected_users'):
-                self.connected_users.clear()
-            if hasattr(self, 'user_processing_enabled'):
-                self.user_processing_enabled.clear()
+            # Stop all recordings
+            for guild_id, voice_client in list(self.state.active_voices.items()):
+                try:
+                    if voice_client.is_connected():
+                        asyncio.create_task(self.stop_listening(voice_client))
+                except (AttributeError, ConnectionError) as e:
+                    logger.error("Error during cleanup for guild %s: %s", guild_id, str(e))
+
+            # Clean up sink
+            if self.state.sink:
+                try:
+                    self.state.sink.cleanup()
+                except Exception as e:
+                    logger.error("Error during sink cleanup: %s", str(e))
+                self.state.sink = None
+
+            # Clear state
+            self.state.active_voices.clear()
+            self.state.connected_users.clear()
+            self.state.user_processing_enabled.clear()
+            self.state.is_listening = False
+
             logger.info("✅ VoiceTranslator cleanup completed")
+            
         except Exception as e:
             logger.error("❌ Error during VoiceTranslator cleanup: %s", str(e))

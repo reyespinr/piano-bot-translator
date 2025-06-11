@@ -18,9 +18,9 @@ logging:
 models:
   # Accurate tier - high-quality models for accuracy
   accurate:
-    # name: "large-v3-turbo"
-    name: "base"
-    count: 2
+    name: "large-v3-turbo"
+    # name: "base"
+    count: 1
     description: "High-accuracy transcription"
     device: "cuda"
     warmup_timeout: 30

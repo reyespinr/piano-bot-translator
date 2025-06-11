@@ -8,22 +8,15 @@ Now uses the unified ModelManager for better organization.
 REFACTORED: Large functions have been broken down into modular components
 in transcription_core.py for better maintainability and testing.
 """
-import asyncio
 import gc
-import random
 import string
-import threading
-import time
 import traceback
 import uuid
 import torch
-from model_manager import model_manager
-import models  # For backward compatibility
 import audio_utils
+from model_manager import model_manager
 from audio_utils import COMMON_HALLUCINATIONS
 from logging_config import get_logger
-
-# Import refactored components
 from transcription_core import transcribe_with_model_refactored
 
 logger = get_logger(__name__)
@@ -46,12 +39,12 @@ async def transcribe(audio_file, current_queue_size=0, concurrent_requests=0, ac
     logger.debug("🎬 [%s] ENTRY: transcribe() called for file: %s",
                  transcription_id, audio_file)
 
-    try:
-        # Load models using the new model manager
+    try:        # Load models using the new model manager
         logger.debug("🔧 [%s] Loading models...", transcription_id)
 
         # Check if models are loaded, if not, initialize them
-        if not model_manager.stats["models_loaded"]:
+        stats = model_manager.get_stats()
+        if not stats["models_loaded"]:
             logger.warning(
                 "[%s] Models not loaded! Initializing...", transcription_id)
             success = await model_manager.initialize_models(warm_up=False)
@@ -222,7 +215,7 @@ async def transcribe_with_model(audio_file, model, model_name, model_index=None)
     Backward compatibility wrapper for the old massive function.
     The actual logic is now in transcription_core.py for better maintainability.
     """
-    return await transcribe_with_model_refactored(audio_file, model, model_name, model_index)
+    return (await transcribe_with_model_refactored(audio_file, model, model_name, model_index))
 
 
 def apply_confidence_filtering(result, transcribed_text, transcription_id):

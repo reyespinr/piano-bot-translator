@@ -6,19 +6,16 @@ smaller, focused functions for better maintainability and testing.
 """
 import asyncio
 import gc
-import random
 import string
 import threading
 import time
 import traceback
 import uuid
-import torch
-from typing import Tuple, Optional, Any, Dict
+from typing import Tuple, Optional, Any
 from dataclasses import dataclass
+import torch
 
 from model_manager import model_manager
-import models  # For backward compatibility
-import audio_utils
 from audio_utils import COMMON_HALLUCINATIONS
 from logging_config import get_logger
 

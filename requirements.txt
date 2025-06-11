@@ -14,6 +14,9 @@ fastapi==0.115.12
 uvicorn[standard]
 websockets
 
+# Configuration management
+PyYAML==6.0.1
+
 # HTTP requests for DeepL API
 requests==2.32.3
 

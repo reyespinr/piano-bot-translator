@@ -226,8 +226,8 @@ class ResultProcessor:
             raise
 
     @staticmethod
-    def handle_icelandic_detection(raw_result: Any, transcribed_text: str, detected_language: str,
-                                   request: TranscriptionRequest, model_lock: threading.RLock) -> Tuple[str, str, Any]:
+    async def handle_icelandic_detection(raw_result: Any, transcribed_text: str, detected_language: str,
+                                         request: TranscriptionRequest, model_lock: threading.RLock) -> Tuple[str, str, Any]:
         """Handle Austrian German misidentified as Icelandic."""
         if detected_language == "is":  # "is" is the language code for Icelandic
             logger.info("🇦🇹 [%s] Detected Icelandic - likely Austrian German. Re-transcribing as German...",
@@ -252,9 +252,7 @@ class ResultProcessor:
                     model_lock.release()
 
             loop = asyncio.get_event_loop()
-            retry_result = loop.run_until_complete(
-                loop.run_in_executor(None, retranscribe_task)
-            )
+            retry_result = await loop.run_in_executor(None, retranscribe_task)
 
             if retry_result:
                 if hasattr(retry_result, 'text'):
@@ -418,10 +416,8 @@ async def transcribe_with_model_refactored(audio_file: str, model: Any, model_na
 
         # Extract text and language from result
         transcribed_text, detected_language = ResultProcessor.extract_result_data(
-            result, request.transcription_id)
-
-        # Handle Austrian German misidentified as Icelandic
-        transcribed_text, detected_language, result = ResultProcessor.handle_icelandic_detection(
+            result, request.transcription_id)        # Handle Austrian German misidentified as Icelandic
+        transcribed_text, detected_language, result = await ResultProcessor.handle_icelandic_detection(
             result, transcribed_text, detected_language, request, model_lock)
 
         # Apply confidence filtering

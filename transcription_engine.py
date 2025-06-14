@@ -160,7 +160,12 @@ class TranscriptionEngine:
             "Resource temporarily unavailable",
             "cuda out of memory",
             "RuntimeError: CUDA",
-            "torch.cuda.OutOfMemoryError"
+            "torch.cuda.OutOfMemoryError",
+            "RuntimeError: NYI",  # PyTorch TorchScript "Not Yet Implemented" errors
+            "TorchScript interpreter",  # General TorchScript errors
+            "vad/model/vad_annotator",  # VAD model specific errors
+            # TorchScript operation failures
+            "RuntimeError: The following operation failed in the TorchScript"
         ]
         return any(recoverable in error_str.lower() for recoverable in recoverable_errors)
 

@@ -80,6 +80,7 @@ async def lifespan(_app: FastAPI):
                 "✅ Connection chain verified: bot_manager -> voice_translator -> state -> websocket_handler")
         else:
             logger.error("❌ Connection chain BROKEN!")
+        global bot
         bot = bot_manager.create_bot(translation_callback)
 
         # Initialize models using the unified ModelManager

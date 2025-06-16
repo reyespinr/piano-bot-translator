@@ -125,7 +125,13 @@ class WebSocketMessageRouter:
                 )
                 return
 
-            success, msg = await self.bot_manager.join_voice_channel(channel_id)
+            result = await self.bot_manager.join_voice_channel(channel_id)
+            # If result is a tuple, unpack; otherwise, treat as boolean
+            if isinstance(result, tuple):
+                success, msg = result
+            else:
+                success = result
+                msg = "Joined channel successfully." if success else "Failed to join channel."
             await self.connection_manager.send_response(websocket, "join_channel", success, msg)
 
             if success:

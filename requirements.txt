@@ -12,7 +12,7 @@ stable-ts==2.19.0
 # Web framework and API
 fastapi==0.115.12
 uvicorn[standard]
-websockets
+websockets==15.0.1
 
 # Configuration management
 PyYAML==6.0.1

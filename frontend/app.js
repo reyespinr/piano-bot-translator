@@ -8,9 +8,9 @@ class PianoBotClient {
         this.socket = null;
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 5;
-        this.reconnectDelay = 1000;
-        this.isConnected = false;
+        this.reconnectDelay = 1000;        this.isConnected = false;
         this.messageQueue = [];
+        this.updatesPaused = false;
         
         // UI state
         this.selectedGuild = null;
@@ -574,14 +574,16 @@ class PianoBotClient {
         }
         
         return container;
-    }
-
-    pauseUpdates() {
-        // Placeholder for future functionality
+    }    pauseUpdates() {
+        // Pause UI updates when page is not visible for better performance
+        this.updatesPaused = true;
+        console.log('Updates paused - page hidden');
     }
 
     resumeUpdates() {
-        // Placeholder for future functionality
+        // Resume UI updates when page becomes visible
+        this.updatesPaused = false;
+        console.log('Updates resumed - page visible');
     }
 
     handleTranscription(data) {
@@ -596,9 +598,12 @@ class PianoBotClient {
             this.displayMessageWithContinuity(this.elements.translationsContainer, data, 'translation');
             this.trimMessages(this.elements.translationsContainer);
         }
-    }
-
-    displayMessageWithContinuity(container, data, type) {
+    }    displayMessageWithContinuity(container, data, type) {
+        // Skip UI updates if paused (page not visible)
+        if (this.updatesPaused) {
+            return;
+        }
+        
         const user = data.user;
         const text = data.text;
         const userId = String(data.user_id);

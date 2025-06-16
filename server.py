@@ -15,7 +15,7 @@ from discord.ext import commands
 from fastapi import FastAPI, WebSocket
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-
+from model_manager import model_manager
 from bot_manager import DiscordBotManager
 from websocket_handler import WebSocketManager
 from translation_service import VoiceTranslator
@@ -40,23 +40,15 @@ voice_translator = None
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
     """Handle application startup and shutdown events."""
-    global bot_manager, websocket_manager, voice_translator
-
-    # Startup
+    global bot_manager, websocket_manager, voice_translator    # Startup
     logger.info("🚀 Starting Discord Voice Translator Server...")
-
     try:
         # Clean up any leftover audio files first
         logger.info("🧹 Cleaning up any leftover audio files...")
-        cleaned_files = clean_temp_files()
-
-        # CRITICAL FIX: Handle None return value from cleanup function
-        if cleaned_files is not None and cleaned_files > 0:
-            logger.info("✅ Cleaned up %d leftover audio files", cleaned_files)
-        else:
-            logger.info("✅ No leftover audio files found")
+        clean_temp_files()  # This function doesn't return a value, just performs cleanup
+        logger.info("✅ Audio file cleanup completed")
 
         # Initialize bot manager
         bot_manager = DiscordBotManager()
@@ -92,17 +84,34 @@ async def lifespan(app: FastAPI):
 
         # Initialize models using the unified ModelManager
         logger.info("Initializing transcription models...")
-        from model_manager import model_manager
         success = await model_manager.initialize_models(warm_up=False)
         if success:
             logger.info("✅ Models initialized successfully")
         else:
             logger.error("❌ Model initialization failed!")
+            # Start model warm-up
             raise Exception("Model initialization failed")
-
-        # Start model warm-up
         logger.info("Starting model warm-up...")
-        asyncio.create_task(warm_up_models())
+
+        async def warmup_task():
+            try:
+                logger.info("🔥 Starting background model warm-up...")
+                success = await model_manager.warm_up_models()
+                if success:
+                    logger.info("🎯 Model warm-up completed successfully!")
+                else:
+                    logger.warning(
+                        "⚠️ Model warm-up had some issues but models should still work")
+                # Broadcast ready status to all connected clients
+                if websocket_manager:
+                    await websocket_manager.broadcast_bot_status(True)
+            except Exception as e:
+                logger.error("❌ Model warm-up failed: %s", str(e))
+                # Still broadcast that bot is ready (models may work anyway)
+                if websocket_manager:
+                    await websocket_manager.broadcast_bot_status(True)
+
+        asyncio.create_task(warmup_task())
 
         # Start Discord bot
         logger.info("Starting Discord bot...")
@@ -131,37 +140,8 @@ async def lifespan(app: FastAPI):
         if voice_translator:
             voice_translator.cleanup()
         logger.info("✅ Server shutdown completed")
-
     except Exception as e:
         logger.error("❌ Shutdown error: %s", str(e))
-
-
-async def warm_up_models():
-    """Warm up transcription models in the background using the unified ModelManager."""
-    try:
-        logger.info("🔥 Starting background model warm-up...")
-        from model_manager import model_manager
-
-        # Use the model manager's warm-up functionality
-        success = await model_manager.warm_up_models()
-
-        if success:
-            logger.info("🎯 Model warm-up completed successfully!")
-        else:
-            logger.warning(
-                "⚠️ Model warm-up had some issues but models should still work")
-
-        # Broadcast ready status to all connected clients
-        if websocket_manager:
-            await websocket_manager.broadcast_bot_status(True)
-
-    except Exception as e:
-        logger.error("❌ Model warm-up failed: %s", str(e))
-        logger.error("❌ Warm-up traceback: %s", traceback.format_exc())
-
-        # Still broadcast that bot is ready (models may work anyway)
-        if websocket_manager:
-            await websocket_manager.broadcast_bot_status(True)
 
 
 # Create FastAPI app
@@ -220,9 +200,8 @@ async def on_ready():
         voice_translator.set_websocket_handler(websocket_manager)
         logger.info(
             "🔗 Re-established WebSocket handler connection after bot ready")
-
         # Verify the connection is working
-        if (hasattr(voice_translator, 'websocket_handler') and voice_translator.websocket_handler):
+        if (hasattr(voice_translator.state, 'websocket_handler') and voice_translator.state.websocket_handler):
             logger.info("✅ WebSocket handler verified in voice translator")
         else:
             logger.error("❌ WebSocket handler NOT SET in voice translator!")
@@ -246,8 +225,7 @@ def read_token():
             if token:
                 logger.info("✅ Bot token found in token.txt")
                 return token
-            else:
-                logger.error("❌ token.txt file is empty!")
+            logger.error("❌ token.txt file is empty!")
         except Exception as e:
             logger.error("❌ Error reading token.txt: %s", str(e))
     else:
@@ -258,8 +236,6 @@ def read_token():
 
 async def main():
     """Main application entry point."""
-    # REMOVED: Duplicate startup logging and token reading - this is now handled in lifespan()
-
     try:
         # Configure and start web server
         config = uvicorn.Config(

@@ -5,15 +5,12 @@ This module contains the refactored translator logic, broken down into
 smaller, focused classes for better maintainability and testing.
 """
 import asyncio
-import gc
-import os
 import struct
-import subprocess
 import sys
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Tuple, Any
 
-from audio_processing_utils import force_delete_file, CLEANUP_DELAY
+from audio_processing_utils import CLEANUP_DELAY
 from audio_sink import RealTimeWaveSink
 from logging_config import get_logger
 
@@ -287,21 +284,6 @@ class UserStateManager:
                 "Sent user updates: %d users with processing states", len(users))
         except Exception as e:
             logger.error("Failed to send user updates: %s", str(e))
-
-    @staticmethod
-    def get_user_display_name(current_channel: Any, user_id: str) -> str:
-        """Get user display name from Discord channel."""
-        try:
-            if current_channel:
-                # Try to find user in current voice channel first
-                for member in current_channel.members:
-                    if str(member.id) == str(user_id):
-                        return member.display_name
-        except Exception as e:
-            logger.debug("Error getting user display name: %s", str(e))
-
-        # Fallback to generic name if we can't resolve it
-        return f"User {user_id}"
 
 
 class WebSocketBroadcaster:

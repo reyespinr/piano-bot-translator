@@ -11,7 +11,6 @@ in translation_engine.py for better maintainability and testing.
 import asyncio
 from typing import Callable
 
-from audio_processing_utils import force_delete_file
 from translation_engine import (
     VoiceTranslatorState,
     AudioSinkSetup,
@@ -244,15 +243,6 @@ class VoiceTranslator:
         if self.state.is_listening:
             return await self.stop_listening(voice_client)
         return await self.start_listening(voice_client)
-
-    async def _force_delete_file(self, file_path):
-        """Forcefully delete a file with multiple retries."""
-        return await force_delete_file(file_path)
-
-    def _cleanup_audio_file(self, audio_file):
-        """Legacy method for compatibility - use _force_delete_file instead."""
-        if audio_file:
-            asyncio.create_task(self._force_delete_file(audio_file))
 
     def cleanup(self):
         """Clean up resources"""

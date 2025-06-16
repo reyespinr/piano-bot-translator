@@ -3,7 +3,6 @@ Discord bot management module.
 
 Handles Discord bot initialization, lifecycle, and coordination of bot components.
 """
-import asyncio
 import discord
 from discord.ext import commands
 from logging_config import get_logger

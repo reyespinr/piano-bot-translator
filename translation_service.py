@@ -93,17 +93,28 @@ class VoiceTranslator:
 
     async def _get_user_display_name(self, user_id):
         """Get user display name from Discord bot - simplified version."""
-        return UserStateManager.get_user_display_name(self.state.current_channel, user_id)
+        if not self.state.current_channel:
+            return f"User {user_id}"
+
+        try:
+            user_id_int = int(user_id)
+            # Look for the user in current channel members
+            for member in self.state.current_channel.members:
+                if member.id == user_id_int:
+                    return member.display_name
+        except (ValueError, AttributeError):
+            pass
+
+        # Fallback if user not found
+        return f"User {user_id}"
 
     async def toggle_user_processing(self, user_id, enabled):
         """Toggle processing for a specific user."""
         try:
             user_id_str = str(user_id)
-            self.state.user_processing_enabled[user_id_str] = enabled
-
             # Get user info for logging
-            user_name = UserStateManager.get_user_display_name(
-                self.state.current_channel, user_id)
+            self.state.user_processing_enabled[user_id_str] = enabled
+            user_name = await self._get_user_display_name(user_id)
             logger.info("User processing %s for %s (%s)",
                         "enabled" if enabled else "disabled", user_name, user_id)
 

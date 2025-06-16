@@ -14,9 +14,8 @@ import uuid
 from typing import Tuple, Optional, Any
 from dataclasses import dataclass
 import torch
-
+from audio_processing_utils import COMMON_HALLUCINATIONS, is_recoverable_error
 from model_manager import model_manager
-from audio_processing_utils import COMMON_HALLUCINATIONS
 from logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -119,7 +118,6 @@ class TranscriptionEngine:
 
             logger.debug("🎤 [%s] Starting %s model transcription with enhanced settings (attempt %d)",
                          request.transcription_id, model_display_name, retry_count + 1)
-
             # Execute transcription with enhanced settings
             result = request.model.transcribe(
                 request.audio_file,
@@ -148,26 +146,7 @@ class TranscriptionEngine:
 
     def _should_retry(self, error_str: str, retry_count: int) -> bool:
         """Determine if error is recoverable and retry should be attempted."""
-        return retry_count < self.max_retries and self._is_recoverable_error(error_str)
-
-    def _is_recoverable_error(self, error_str: str) -> bool:
-        """Check if the error is a recoverable PyTorch/FFmpeg error."""
-        recoverable_errors = [
-            "ffmpeg",
-            "Invalid audio format",
-            "Audio file could not be read",
-            "Temporary failure",
-            "Resource temporarily unavailable",
-            "cuda out of memory",
-            "RuntimeError: CUDA",
-            "torch.cuda.OutOfMemoryError",
-            "RuntimeError: NYI",  # PyTorch TorchScript "Not Yet Implemented" errors
-            "TorchScript interpreter",  # General TorchScript errors
-            "vad/model/vad_annotator",  # VAD model specific errors
-            # TorchScript operation failures
-            "RuntimeError: The following operation failed in the TorchScript"
-        ]
-        return any(recoverable in error_str.lower() for recoverable in recoverable_errors)
+        return retry_count < self.max_retries and is_recoverable_error(error_str)
 
     def _handle_retry(self, request: TranscriptionRequest, model_lock: threading.RLock,
                       model_display_name: str, retry_count: int, error_str: str):

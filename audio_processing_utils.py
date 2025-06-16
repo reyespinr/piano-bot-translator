@@ -4,11 +4,19 @@ Audio processing utilities for Discord voice transcription_service.
 This module provides audio file processing, validation, and creation utilities
 for handling Discord voice data and preparing it for transcription_service.
 """
+import asyncio
+import gc
+import os
+import subprocess
 import wave
 import numpy as np
 from logging_config import get_logger
 
 logger = get_logger(__name__)
+
+# File cleanup constants
+MAX_DELETE_RETRIES = 3
+CLEANUP_DELAY = 0.5
 
 # CRITICAL RESTORATION: Move common hallucinations here for shared access
 # COMMON_HALLUCINATIONS = {
@@ -78,3 +86,74 @@ def create_dummy_audio_file(filename="warmup_audio.wav"):
         wf.writeframes(audio_data.tobytes())
 
     return filename
+
+
+def is_recoverable_error(error_str):
+    """Check if the error is a recoverable PyTorch/FFmpeg error."""
+    recoverable_errors = [
+        "Expected key.size",
+        "Invalid argument",
+        "Error muxing",
+        "Error submitting",
+        "Error writing trailer",
+        "Error closing file",
+        "RuntimeError: NYI",  # TorchScript VAD errors
+        "Error submitting a packet to the muxer",  # FFmpeg packet errors
+        "vad_annotator.py",  # Any VAD-related errors
+        "Error muxing a packet",  # Additional FFmpeg muxer errors
+        "Task finished with error code",  # FFmpeg task errors
+        "Terminating thread with return code",  # FFmpeg thread errors
+        "out#0/s16le",  # FFmpeg output format errors
+        "aost#0:0/pcm_s16le",  # FFmpeg audio stream errors
+        "ffmpeg",  # General FFmpeg errors
+        "av_",  # FFmpeg/libav function errors
+        "codec",  # Audio codec errors
+        "format"  # Audio format errors
+    ]
+
+    return (any(error in error_str for error in recoverable_errors) or
+            "tensor" in error_str.lower() or
+            "NYI" in error_str or
+            "TorchScript" in error_str or
+            "ffmpeg" in error_str.lower() or
+            "libav" in error_str.lower())  # Catch all FFmpeg/audio errors
+
+
+async def force_delete_file(file_path: str) -> bool:
+    """Forcefully delete a file with multiple retries and GC."""
+    if not file_path or not os.path.exists(file_path):
+        return False
+
+    # Try to delete the file with multiple retries
+    for attempt in range(MAX_DELETE_RETRIES):
+        try:
+            # Force garbage collection to release file handles
+            gc.collect()
+
+            # Delete and verify
+            os.remove(file_path)
+            logger.debug("Deleted file: %s", os.path.basename(file_path))
+
+            if not os.path.exists(file_path):
+                return True
+
+            logger.warning(
+                "File still exists after deletion attempt: %s", file_path)
+        except (PermissionError, OSError) as e:
+            logger.warning("Deletion attempt %d failed: %s",
+                           attempt + 1, str(e))
+            await asyncio.sleep(CLEANUP_DELAY)  # Wait before retry
+
+    # Last resort: try with Windows-specific commands
+    if os.name == 'nt':
+        try:
+            subprocess.run(f'del /F "{file_path}"', shell=True, check=False)
+            logger.debug(
+                "Attempted deletion with Windows command: %s", file_path)
+            return not os.path.exists(file_path)
+        except (OSError, subprocess.SubprocessError) as e:
+            logger.error("Windows command deletion failed: %s", str(e))
+
+    logger.warning(
+        "Failed to delete file after multiple attempts: %s", file_path)
+    return False

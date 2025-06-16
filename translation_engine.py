@@ -13,14 +13,11 @@ import sys
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Tuple, Any
 
+from audio_processing_utils import force_delete_file, CLEANUP_DELAY
 from audio_sink import RealTimeWaveSink
 from logging_config import get_logger
 
 logger = get_logger(__name__)
-
-# Constants for cleanup and deletion
-CLEANUP_DELAY = 0.5
-MAX_DELETE_RETRIES = 3
 
 
 @dataclass
@@ -229,51 +226,6 @@ class ModelManager:
                 pass
 
             return False, f"Model loading failed: {str(e)}"
-
-
-class FileCleanupManager:
-    """Handles file deletion operations."""
-
-    @staticmethod
-    async def force_delete_file(file_path: str) -> bool:
-        """Forcefully delete a file with multiple retries."""
-        if not file_path or not os.path.exists(file_path):
-            return False
-
-        # Try to delete the file with multiple retries
-        for attempt in range(MAX_DELETE_RETRIES):
-            try:
-                # Force garbage collection to release file handles
-                gc.collect()
-
-                # Delete and verify
-                os.remove(file_path)
-                logger.debug("Deleted file: %s", os.path.basename(file_path))
-
-                if not os.path.exists(file_path):
-                    return True
-
-                logger.warning(
-                    "File still exists after deletion attempt: %s", file_path)
-            except (PermissionError, OSError) as e:
-                logger.warning("Deletion attempt %d failed: %s",
-                               attempt + 1, str(e))
-                await asyncio.sleep(0.5)  # Wait before retry
-
-        # Last resort: try with Windows-specific commands
-        if os.name == 'nt':
-            try:
-                subprocess.run(f'del /F "{file_path}"',
-                               shell=True, check=False)
-                logger.debug(
-                    "Attempted deletion with Windows command: %s", file_path)
-                return not os.path.exists(file_path)
-            except (OSError, subprocess.SubprocessError) as e:
-                logger.error("Windows command deletion failed: %s", str(e))
-
-        logger.warning(
-            "Failed to delete file after multiple attempts: %s", file_path)
-        return False
 
 
 class UserStateManager:

@@ -3,11 +3,10 @@ Manages audio buffering and file creation for users.
 """
 import io
 import os
-import time
 import wave
-import numpy as np
 from dataclasses import dataclass, field
 from typing import Dict
+import numpy as np
 from logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -64,6 +63,8 @@ class AudioBufferManager:
 
         except (ValueError, TypeError) as e:
             # Fallback: just maintain buffer size
+            logger.warning(
+                "Error processing audio data for user %s: %s", user, str(e))
             user_state.pre_speech_buffer.append(data)
             if len(user_state.pre_speech_buffer) > 5:
                 user_state.pre_speech_buffer.pop(0)

@@ -7,15 +7,14 @@ Simplified server with modular architecture for better maintainability.
 import asyncio
 import sys
 import traceback
+from pathlib import Path
+from contextlib import asynccontextmanager
 import uvicorn
 import discord
-import translation_utils
 from discord.ext import commands
-from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from pathlib import Path
 
 from bot_manager import DiscordBotManager
 from websocket_handler import WebSocketManager

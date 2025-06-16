@@ -15,11 +15,13 @@ from typing import Any, Dict, Optional, Callable, Tuple
 
 import translation_utils
 from logging_config import get_logger
+from audio_worker_manager import AudioWorkerManager
+from audio_session_manager import AudioSession
+from voice_activity_detector import VoiceActivityDetector
+from audio_buffer_manager import AudioBufferManager
+from audio_processing_utils import force_delete_file
 
 logger = get_logger(__name__)
-
-# Constants for audio processing
-MAX_DELETE_RETRIES = 3
 
 
 @dataclass
@@ -46,10 +48,6 @@ class AudioSinkInitializer:
     @staticmethod
     def initialize_components(num_workers: int, event_loop: Optional[asyncio.AbstractEventLoop]) -> Tuple[Any, Any, Any, Any]:
         """Initialize all audio processing components."""
-        from audio_worker_manager import AudioWorkerManager
-        from audio_session_manager import AudioSession
-        from voice_activity_detector import VoiceActivityDetector
-        from audio_buffer_manager import AudioBufferManager
 
         worker_manager = AudioWorkerManager(num_workers, event_loop)
         session = AudioSession()
@@ -299,7 +297,7 @@ class TranscriptionProcessor:
         finally:
             # Clean up the audio file
             if audio_file and os.path.exists(audio_file):
-                await FileCleanupManager.force_delete_file(audio_file)
+                await force_delete_file(audio_file)
             logger.debug(
                 "🔚 transcribe_audio finally block completed for user %s", user)
 
@@ -307,7 +305,8 @@ class TranscriptionProcessor:
     async def _perform_transcription(audio_file: str, user: str, gui_callback: Callable) -> Tuple[str, str]:
         """Perform the actual transcription with error handling."""
         try:
-            logger.debug("📞 Calling translation_utils.transcribe for file: %s", audio_file)
+            logger.debug(
+                "📞 Calling translation_utils.transcribe for file: %s", audio_file)
             transcribed_text, detected_language = await translation_utils.transcribe(audio_file)
             logger.debug("🎯 Transcription result for user %s: text='%s', language=%s",
                          user, transcribed_text, detected_language)
@@ -457,51 +456,6 @@ class QueueMonitor:
                 worker_manager.timer.start()
         except Exception as timer_error:
             logger.error("Failed to restart timer: %s", str(timer_error))
-
-
-class FileCleanupManager:
-    """Handles file cleanup operations."""
-
-    @staticmethod
-    async def force_delete_file(file_path: str) -> bool:
-        """Forcefully delete a file with multiple retries and GC."""
-        if not file_path or not os.path.exists(file_path):
-            return False
-
-        # Try to delete the file with multiple retries
-        for attempt in range(MAX_DELETE_RETRIES):
-            try:
-                # Force garbage collection to release file handles
-                gc.collect()
-
-                # Delete and verify
-                os.remove(file_path)
-                logger.debug("Deleted file: %s", os.path.basename(file_path))
-
-                if not os.path.exists(file_path):
-                    return True
-
-                logger.warning(
-                    "File still exists after deletion attempt: %s", file_path)
-            except (PermissionError, OSError) as e:
-                logger.warning("Deletion attempt %d failed: %s",
-                               attempt + 1, str(e))
-                await asyncio.sleep(0.5)  # Wait before retry
-
-        # Last resort: try with Windows-specific commands
-        if os.name == 'nt':
-            try:
-                subprocess.run(f'del /F "{file_path}"',
-                               shell=True, check=False)
-                logger.debug(
-                    "Attempted deletion with Windows command: %s", file_path)
-                return not os.path.exists(file_path)
-            except (OSError, subprocess.SubprocessError) as e:
-                logger.error("Windows command deletion failed: %s", str(e))
-
-        logger.warning(
-            "Failed to delete file after multiple attempts: %s", file_path)
-        return False
 
 
 class GUIUpdateManager:

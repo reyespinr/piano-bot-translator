@@ -2,8 +2,7 @@
 
 logging:
   # Console logging level: 'DEBUG' or 'INFO'
-  # DEBUG: Shows all log messages on console
-  # INFO: Shows only INFO and above on console
+  # DEBUG: Shows all log messages on console  # INFO: Shows only INFO and above on console
   console_level: 'INFO'
   
   # File logging is always DEBUG regardless of console_level
@@ -15,9 +14,26 @@ logging:
   # Number of backup log files to keep (plus 1 current = 5 total files)
   backup_count: 4
 
-# Future configuration sections (to be populated later)
+# Model configuration
 models:
-  # Model configuration will go here
+  # Accurate tier - high-quality models for accuracy
+  accurate:
+    name: "large-v3-turbo"
+    # name: "base"
+    count: 1
+    description: "High-accuracy transcription"
+    device: "cuda"
+    warmup_timeout: 30
+    
+  # Fast tier - small, fast models for speed and parallelization  
+  fast:
+    name: "base"
+    count: 3
+    description: "Fast parallel transcription"
+    device: "cuda"
+    warmup_timeout: 30
+    min_pool_size: 1
+    max_pool_size: 5
   
 audio:
   # Audio processing configuration will go here

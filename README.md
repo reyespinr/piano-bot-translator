@@ -6,23 +6,27 @@ A real-time Discord voice channel translator that transcribes and translates spe
 
 - **Real-time Voice Processing**: Live transcription and translation of Discord voice channel audio
 - **Multi-language Support**: Automatic language detection and translation to English
-- **Web Dashboard**: Modern Discord-themed web interface for control and monitoring
-- **User Management**: Individual user processing toggles for selective filtering
-- **Smart Speech Detection**: Context-aware speech processing with adaptive thresholds
-- **Session-based Priority**: Improved conversation context through priority filtering
-- **Modern Architecture**: Clean FastAPI backend with WebSocket real-time communication
+- **Dual Web Interface**: Modern Discord-themed admin interface + read-only spectator view
+- **Individual User Management**: Toggle processing for specific users with real-time controls
+- **Smart Speech Detection**: Advanced voice activity detection with adaptive thresholds
+- **Multi-tier Model Support**: Configurable accurate/fast model tiers for optimal performance
+- **WebSocket Real-time Communication**: Instant updates with auto-reconnect functionality
+- **Modular Architecture**: Clean component separation with centralized configuration
+- **Production Ready**: Comprehensive logging, error handling, and resource management
 
 ## Architecture
 
-- **Backend**: FastAPI server with Discord.py bot integration
+- **Backend**: FastAPI server with py-cord Discord bot integration
 - **Frontend**: Real-time web dashboard with WebSocket communication
-- **Audio Processing**: Custom Discord audio sink with real-time speech detection
+- **Audio Processing**: Modular Discord audio sink with real-time speech detection
 - **ML Models**: OpenAI Whisper for transcription, DeepL API for translation
-- **State Management**: Dataclass-based state management with proper cleanup
+- **State Management**: Dataclass-based state management with centralized configuration
+- **WebSocket System**: Dual-mode WebSocket support (admin/spectator) with message routing
+- **Modular Design**: Component-based architecture with dedicated managers for different concerns
 
 ## Prerequisites
 
-- Python 3.8 or higher
+- Python 3.10 or higher
 - Discord bot token (see setup instructions below)
 - DeepL API key (free tier available)
 - Windows/Linux/macOS with audio support
@@ -41,12 +45,16 @@ pip install -r requirements.txt
 ```
 
 **What gets installed:**
-- `discord.py[voice]` + `PyNaCl` - Discord voice channel integration
-- `stable-ts` - Enhanced Whisper transcription (auto-installs: openai-whisper, torch, torchaudio, numpy, numba)
-- `fastapi` + `uvicorn` - Web server and WebSocket handling  
+- `py-cord` + `PyNaCl` - Modern Discord voice channel integration
+- `stable-ts` - Enhanced Whisper transcription with better stability
+- `torch` + `torchaudio` - PyTorch ML framework with CUDA support
+- `numpy<2.0` - Numerical computing (version locked for compatibility)
+- `fastapi` + `uvicorn` - Modern async web server and WebSocket handling
+- `websockets` - WebSocket support for real-time communication
+- `PyYAML` - Configuration file management
 - `requests` - HTTP client for DeepL API
 
-The optimized requirements.txt only includes essential packages, reducing installation time and potential conflicts.
+The optimized requirements.txt includes specific versions and CUDA support for better performance and compatibility.
 
 ### 3. System Dependencies
 
@@ -73,7 +81,7 @@ brew install ffmpeg
 
 ### 5. Setup DeepL API (Optional but Recommended)
 1. Sign up for a free DeepL API account
-2. Update the API key in `utils.py` (line 162)
+2. Update the API key in `translation.py` (search for DeepL API configuration)
 3. The free tier provides 500,000 characters/month
 
 ### 6. Invite Bot to Server
@@ -161,38 +169,74 @@ journalctl -u piano-bot.service -f
 
 ## Configuration
 
+### Model Configuration
+The system now uses a centralized `config.yaml` file for model configuration. Edit this file to adjust:
+
+```yaml
+models:
+  # Accurate tier - high-quality models for accuracy
+  accurate:
+    name: "large-v3-turbo"  # or "large-v3", "base"
+    count: 1
+    device: "cuda"  # or "cpu"
+    warmup_timeout: 30
+    
+  # Fast tier - small, fast models for speed and parallelization  
+  fast:
+    name: "base"  # or "tiny", "small"
+    count: 3
+    device: "cuda"
+    warmup_timeout: 30
+```
+
 ### Audio Processing Settings
-Edit `custom_sink.py` to adjust:
+Edit `audio_sink_core.py` and related audio processing modules to adjust:
 - Speech detection thresholds
 - Buffer sizes and timing
 - Silence detection parameters
 
 ### Translation Settings
-Edit `utils.py` to modify:
+Edit `translation_utils.py` to modify:
 - Language detection sensitivity
 - Translation API endpoints
-- Transcription model settings
+- DeepL API configuration
 
-### Model Configuration
-By default, the system uses the Whisper "base" model for faster processing. For better accuracy, change the model in `utils.py`:
-```python
-MODEL_NAME = "large-v3"  # More accurate but slower
+### Logging Configuration
+Edit `config.yaml` to adjust logging levels:
+```yaml
+logging:
+  console_level: 'INFO'  # or 'DEBUG'
+  file_level: 'DEBUG'
+  max_file_size: 10
+  backup_count: 4
 ```
 
 ## API Endpoints
 
-- **WebSocket**: `ws://localhost:8000/ws` - Real-time communication
-- **Static Files**: `http://localhost:8000/` - Web dashboard
-- **Health Check**: Bot status available through WebSocket
+- **WebSocket (Admin)**: `ws://localhost:8000/ws` - Full control interface
+- **WebSocket (Spectator)**: `ws://localhost:8000/ws/spectator` - Read-only monitoring
+- **Main Dashboard**: `http://localhost:8000/` - Admin web interface
+- **Spectator View**: `http://localhost:8000/spectator` - Read-only web interface
+- **Static Files**: `http://localhost:8000/*` - Frontend assets
+
+### Interface Modes
+
+**Admin Interface** (`http://localhost:8000/`):
+- Full bot control (join/leave channels, start/stop listening)
+- Individual user toggle controls
+- Real-time transcription and translation display
+- Bot status monitoring and configuration
+
+**Spectator Interface** (`http://localhost:8000/spectator`):
+- Read-only view of live transcriptions and translations
+- Real-time updates without control capabilities
+- Perfect for sharing with team members or viewers
+- Minimal resource usage for display-only purposes
 
 ## Troubleshooting
 
 ### Common Issues
 
-**"No module named 'discord'"**
-```bash
-pip install discord.py[voice]
-```
 
 **"FFmpeg not found"**
 - Install FFmpeg and ensure it's in your system PATH
@@ -206,7 +250,7 @@ pip install discord.py[voice]
 - Verify microphone detection thresholds
 
 **"Translation not working"**
-- Verify DeepL API key in `utils.py`
+- Verify DeepL API key in `translation_utils.py`
 - Check internet connectivity
 - Monitor API quota usage
 
@@ -218,39 +262,85 @@ pip install discord.py[voice]
 ### Performance Optimization
 
 **For faster transcription:**
-- Use smaller Whisper models ("tiny", "base")
-- Reduce audio buffer sizes
-- Use GPU acceleration if available
+- Use smaller Whisper models in `config.yaml` ("tiny", "base")
+- Increase the `fast` tier model count for parallel processing
+- Use GPU acceleration by setting `device: "cuda"`
+- Reduce audio buffer sizes in audio processing modules
 
 **For better accuracy:**
-- Use larger models ("large-v3")
-- Increase speech detection thresholds
+- Use larger models in `config.yaml` ("large-v3", "large-v3-turbo")
+- Use the `accurate` tier for critical transcriptions
+- Increase speech detection thresholds in audio processing
 - Enable advanced audio preprocessing
 
 ## Development
 
 ### Code Structure
 ```
-├── server.py              # Main FastAPI server and Discord bot
-├── translator.py          # Voice translation logic
-├── custom_sink.py         # Discord audio processing
-├── utils.py              # Transcription and translation utilities
-├── cleanup.py            # Temporary file management
-├── logging_config.py     # Logging configuration
-├── frontend/             # Web dashboard
-│   ├── index.html        # Main interface
-│   ├── app.js           # Frontend logic
-│   └── styles.css       # Discord-themed styling
-└── requirements.txt      # Python dependencies
+├── server.py                      # Main FastAPI server and Discord bot
+├── config.yaml                    # Centralized configuration
+├── requirements.txt               # Python dependencies with CUDA support
+├── translation_service.py         # Voice translation manager
+├── translation_engine.py          # Core translation components
+├── translation_utils.py           # Translation and language utilities
+├── audio_sink.py                  # Discord audio sink implementation
+├── audio_sink_core.py             # Core audio processing logic
+├── audio_processing_utils.py      # Audio processing utilities
+├── audio_buffer_manager.py        # Audio buffer management
+├── audio_session_manager.py       # Audio session handling
+├── audio_worker_manager.py        # Audio worker management
+├── bot_manager.py                 # Discord bot lifecycle management
+├── model_manager.py               # ML model management and loading
+├── model_core.py                  # Core model management components
+├── websocket_handler.py           # WebSocket connection management
+├── websocket_broadcaster.py       # WebSocket message broadcasting
+├── websocket_connection_manager.py # WebSocket connection handling
+├── websocket_message_router.py    # WebSocket message routing
+├── websocket_state_manager.py     # WebSocket state management
+├── discord_voice_events.py        # Discord voice event handling
+├── discord_channel_manager.py     # Discord channel operations
+├── discord_user_manager.py        # Discord user operations
+├── transcription_engine.py        # Speech transcription logic
+├── transcription_service.py       # Transcription service coordination
+├── voice_activity_detector.py     # Voice activity detection
+├── cleanup.py                     # Temporary file management
+├── logging_config.py              # Logging configuration
+├── config_manager.py              # Configuration management
+├── code_stats.py                  # Code analysis and statistics
+├── frontend/                      # Web dashboard
+│   ├── index.html                 # Main admin interface
+│   ├── spectator.html             # Read-only spectator interface
+│   ├── app.js                     # Frontend logic with auto-reconnect
+│   ├── styles.css                 # Discord-themed styling
+│   └── favicon.ico                # Site icon
+└── logs/                          # Application logs
 ```
 
 ### State Management
-The application uses a dataclass-based state management system (`BotServerState`) that centralizes:
-- Bot connection status
-- Voice channel information
-- User processing states
-- Translation history
-- WebSocket connections
+The application uses a modular, dataclass-based architecture with centralized state management:
+
+**Core State Classes:**
+- `VoiceTranslatorState` - Voice translation state and configuration
+- `WebSocketStateManager` - WebSocket client states and user processing settings
+- `ModelManager` - ML model loading, warm-up, and lifecycle management
+- `AudioSinkState` - Audio processing and buffer management
+- `TranscriptionRequest/Result` - Structured transcription handling
+
+**Key State Components:**
+- Bot connection status and voice channel information
+- User processing states with individual toggle controls
+- Real-time transcription and translation data
+- WebSocket connection management (admin/spectator modes)
+- Model loading status and warm-up progress
+- Audio processing buffers and voice activity detection
+- Session-based audio management and cleanup
+
+**Modular Architecture:**
+- Separation of concerns with dedicated managers for Discord, WebSocket, and ML operations
+- Clean interfaces between components for easier testing and maintenance
+- Centralized configuration through `config.yaml`
+- Proper resource cleanup and error handling
+- Component-based design with focused responsibilities
 
 ### Contributing
 1. Follow existing code style and patterns
@@ -268,5 +358,5 @@ This project is open source. Please respect Discord's Terms of Service and API g
 - [OpenAI Whisper](https://github.com/openai/whisper) for speech recognition
 - [stable-ts](https://github.com/jianfch/stable-ts) for enhanced Whisper processing
 - [DeepL](https://www.deepl.com/api) for translation services
-- [Discord.py](https://discordpy.readthedocs.io/) for Discord integration
+- [py-cord](https://github.com/Pycord-Development/pycord) for modern Discord integration
 - [FastAPI](https://fastapi.tiangolo.com/) for web framework

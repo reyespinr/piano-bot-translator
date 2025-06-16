@@ -149,7 +149,7 @@ class CodeAnalyzer:
             file_stats.append(stats)
 
             # Print individual file stats
-            print(f"{stats.filename:<25} | "
+            print(f"{stats.filename:<40}    | "
                   f"Lines: {stats.total_lines:>4} | "
                   f"Code: {stats.code_lines:>4} | "
                   f"Comments: {stats.comment_lines:>3} | "

@@ -7,6 +7,7 @@ Simplified server with modular architecture for better maintainability.
 import asyncio
 import sys
 import traceback
+import signal
 from pathlib import Path
 from contextlib import asynccontextmanager
 import uvicorn
@@ -21,8 +22,44 @@ from websocket_handler import WebSocketManager
 from translation_service import VoiceTranslator
 from cleanup import clean_temp_files
 from logging_config import get_logger
+import psutil
+import threading
+import time
 
 logger = get_logger(__name__)
+
+# Global exception handler for async tasks
+
+
+def handle_task_exception(task):
+    """Handle exceptions from background tasks."""
+    try:
+        task.result()
+    except Exception as e:
+        logger.error("❌ Background task failed: %s", str(e))
+        logger.error("❌ Task exception traceback: %s", traceback.format_exc())
+        # Don't re-raise - just log it
+
+
+def create_task_with_exception_handling(coro, name=None):
+    """Create a task with proper exception handling."""
+    task = asyncio.create_task(coro, name=name)
+    task.add_done_callback(handle_task_exception)
+    return task
+
+# Signal handlers for graceful shutdown
+
+
+def signal_handler(signum, frame):
+    """Handle termination signals."""
+    logger.info(f"🛑 Received signal {signum}, initiating graceful shutdown...")
+    # Set a flag or trigger shutdown logic
+    sys.exit(0)
+
+
+# Register signal handlers
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
 
 # Discord bot setup
 
@@ -112,16 +149,17 @@ async def lifespan(_app: FastAPI):
                 if websocket_manager:
                     await websocket_manager.broadcast_bot_status(True)
 
-        asyncio.create_task(warmup_task())
+        create_task_with_exception_handling(warmup_task(), "model_warmup")
 
         # Start Discord bot
         logger.info("Starting Discord bot...")
         # Read token here instead of in main
         with open('token.txt', 'r', encoding='utf-8') as f:
-            bot_token = f.read().strip()
+            discord_bot_token = f.read().strip()
 
         # Start bot as background task
-        asyncio.create_task(bot_manager.start_bot(bot_token))
+        create_task_with_exception_handling(
+            bot_manager.start_bot(discord_bot_token), "discord_bot")
         logger.info("✅ Discord bot startup initiated")
 
         logger.info("🎉 Server startup completed successfully!")
@@ -193,19 +231,43 @@ app.mount("/", StaticFiles(directory="frontend", html=True), name="static")
 @bot.event
 async def on_ready():
     """Bot ready event."""
-    logger.info("🎯 Discord bot is ready! Logged in as %s", bot.user)
+    try:
+        logger.info("🎯 Discord bot is ready! Logged in as %s", bot.user)
 
-    # CRITICAL FIX: Re-verify and re-establish the connection chain when bot is ready
-    global voice_translator, websocket_manager
-    if voice_translator and websocket_manager:
-        voice_translator.set_websocket_handler(websocket_manager)
-        logger.info(
-            "🔗 Re-established WebSocket handler connection after bot ready")
-        # Verify the connection is working
-        if (hasattr(voice_translator.state, 'websocket_handler') and voice_translator.state.websocket_handler):
-            logger.info("✅ WebSocket handler verified in voice translator")
-        else:
-            logger.error("❌ WebSocket handler NOT SET in voice translator!")
+        # CRITICAL FIX: Re-verify and re-establish the connection chain when bot is ready
+        global voice_translator, websocket_manager
+        if voice_translator and websocket_manager:
+            voice_translator.set_websocket_handler(websocket_manager)
+            logger.info(
+                "🔗 Re-established WebSocket handler connection after bot ready")
+            # Verify the connection is working
+            if (hasattr(voice_translator.state, 'websocket_handler') and voice_translator.state.websocket_handler):
+                logger.info("✅ WebSocket handler verified in voice translator")
+            else:
+                logger.error(
+                    "❌ WebSocket handler NOT SET in voice translator!")
+    except Exception as e:
+        logger.error("❌ Error in on_ready event: %s", str(e))
+        logger.error("❌ on_ready traceback: %s", traceback.format_exc())
+
+
+@bot.event
+async def on_error(event, *args, **kwargs):
+    """Global Discord.py error handler."""
+    logger.error("❌ Discord.py error in event %s: %s", event, str(args))
+    logger.error("❌ Discord.py error traceback: %s", traceback.format_exc())
+
+
+@bot.event
+async def on_disconnect():
+    """Handle bot disconnection."""
+    logger.warning("⚠️ Discord bot disconnected!")
+
+
+@bot.event
+async def on_resumed():
+    """Handle bot reconnection."""
+    logger.info("🔄 Discord bot reconnected!")
 
 
 # Initialize voice translator
@@ -233,6 +295,71 @@ def read_token():
         logger.error("❌ token.txt file not found!")
 
     return None
+
+
+# Add process monitoring
+def monitor_process_health():
+    """Monitor process health in background thread."""
+    while True:
+        try:            # Check memory usage
+            memory_percent = psutil.virtual_memory().percent
+            if memory_percent > 90:
+                logger.warning(f"⚠️ High memory usage: {memory_percent}%")
+
+            # Check if we have GPU
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    # Get current device
+                    current_device = torch.cuda.current_device()
+                    device_count = torch.cuda.device_count()
+
+                    # Get PyTorch allocated memory
+                    gpu_memory = torch.cuda.memory_allocated(
+                        current_device) / 1024**3
+                    gpu_reserved = torch.cuda.memory_reserved(
+                        current_device) / 1024**3
+
+                    # Try to get total GPU memory
+                    try:
+                        device_props = torch.cuda.get_device_properties(
+                            current_device)
+                        total_memory = device_props.total_memory / 1024**3
+                        device_name = device_props.name
+
+                        logger.debug(
+                            f"GPU Memory (Device {current_device}/{device_count} - {device_name}): "
+                            f"{gpu_memory:.2f}GB allocated / {gpu_reserved:.2f}GB reserved / {total_memory:.2f}GB total"
+                        )
+
+                        # Also log memory info for all available devices (only once per startup)
+                        if not hasattr(monitor_process_health, '_gpu_devices_logged'):
+                            for i in range(device_count):
+                                props = torch.cuda.get_device_properties(i)
+                                logger.info(
+                                    f"🎮 GPU {i}: {props.name} - {props.total_memory / 1024**3:.2f}GB total")
+                            monitor_process_health._gpu_devices_logged = True
+
+                    except Exception as gpu_error:
+                        logger.debug(
+                            f"GPU Memory (Device {current_device}): {gpu_memory:.2f}GB allocated / {gpu_reserved:.2f}GB reserved (PyTorch only)")
+                        logger.debug(f"GPU details error: {gpu_error}")
+
+                    if gpu_memory > 7.5:  # Alert if using more than 7.5GB
+                        logger.warning(
+                            f"⚠️ High GPU memory usage: {gpu_memory:.2f}GB")
+            except ImportError:
+                pass
+
+            time.sleep(30)  # Check every 30 seconds
+        except Exception as e:
+            logger.error(f"Process monitor error: {e}")
+            time.sleep(60)  # Wait longer if error
+
+
+# Start monitoring thread
+monitor_thread = threading.Thread(target=monitor_process_health, daemon=True)
+monitor_thread.start()
 
 
 async def main():

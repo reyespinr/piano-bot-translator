@@ -21,13 +21,26 @@ class DiscordChannelManager:
         try:
             channel = self.bot_manager.bot.get_channel(int(channel_id))
             if not channel:
+                # Leave current channel if connected
                 return False, "Channel not found"
-
-            # Leave current channel if connected
             await self._leave_current_channel()
 
-            # Join new channel
-            voice_client = await channel.connect()
+            # Join new channel with timeout and reconnect settings
+            voice_client = await channel.connect(
+                timeout=60.0,  # Increase connection timeout
+                reconnect=True  # Enable auto-reconnect
+            )
+
+            # Set deaf/mute status after connecting to stay "active"
+            if voice_client.guild.me:
+                try:
+                    await voice_client.guild.me.edit(deafen=False, mute=False)
+                    logger.debug(
+                        "Set bot as undeafened and unmuted to stay active")
+                except Exception as e:
+                    logger.warning(
+                        "Could not set deaf/mute status: %s", str(e))
+
             await self._setup_channel_connection(channel)
 
             # Initialize user processing for channel members

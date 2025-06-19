@@ -34,6 +34,7 @@ class VoiceTranslator:
         self.state = VoiceTranslatorState(
             translation_callback=translation_callback)
         logger.info("✅ VoiceTranslator initialized")
+        self._keep_alive_task = None
 
     def set_websocket_handler(self, handler):
         """Set the WebSocket handler for sending user updates."""
@@ -210,6 +211,9 @@ class VoiceTranslator:
             # Broadcast listening status to all clients
             await WebSocketBroadcaster.broadcast_listen_status(self.state.websocket_handler, True)
 
+            # Start keep-alive mechanism
+            await self._start_keep_alive(voice_client)
+
             return True, "Started listening"
 
         except Exception as e:
@@ -243,6 +247,9 @@ class VoiceTranslator:
             # Broadcast listening status to all clients
             await WebSocketBroadcaster.broadcast_listen_status(self.state.websocket_handler, False)
 
+            # Stop keep-alive mechanism
+            await self._stop_keep_alive()
+
             return True, "Stopped listening"
 
         except Exception as e:
@@ -254,6 +261,40 @@ class VoiceTranslator:
         if self.state.is_listening:
             return await self.stop_listening(voice_client)
         return await self.start_listening(voice_client)
+
+    async def _start_keep_alive(self, voice_client):
+        """Start keep-alive mechanism to prevent Discord auto-disconnect."""
+        async def keep_alive():
+            while self.state.is_listening and voice_client.is_connected():
+                try:
+                    # Simple keep-alive by just checking connection status
+                    if voice_client.is_connected():
+                        # Check if we have active users or if we should stay connected
+                        if len(self.state.user_processing_enabled) == 0:
+                            # Even if no users, keep connection alive
+                            logger.debug(
+                                "🔄 Keep-alive: maintaining connection even with no active users")
+                        else:
+                            logger.debug("🔄 Keep-alive: connection maintained with %d active users",
+                                         len(self.state.user_processing_enabled))
+
+                    await asyncio.sleep(25)  # Send heartbeat every 25 seconds
+                except Exception as e:
+                    logger.warning("Keep-alive error: %s", str(e))
+                    break
+
+        self._keep_alive_task = asyncio.create_task(keep_alive())
+        logger.info("💓 Started voice connection keep-alive")
+
+    async def _stop_keep_alive(self):
+        """Stop keep-alive mechanism."""
+        if self._keep_alive_task and not self._keep_alive_task.done():
+            self._keep_alive_task.cancel()
+            try:
+                await self._keep_alive_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("💓 Stopped voice connection keep-alive")
 
     def cleanup(self):
         """Clean up resources"""

@@ -90,6 +90,18 @@ def create_dummy_audio_file(filename="warmup_audio.wav"):
 
 def is_recoverable_error(error_str):
     """Check if the error is a recoverable PyTorch/FFmpeg error."""
+    # Non-recoverable errors that should not be retried
+    non_recoverable_errors = [
+        "cannot import name 'dtw_kernel' from 'whisper.triton_ops'",
+        "ImportError",
+        "ModuleNotFoundError",
+        "No module named"
+    ]
+
+    # Check for non-recoverable errors first
+    if any(error in error_str for error in non_recoverable_errors):
+        return False
+
     recoverable_errors = [
         "Expected key.size",
         "Invalid argument",

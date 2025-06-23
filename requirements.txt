@@ -8,6 +8,7 @@ numpy<2.0
 torch==2.0.1+cu118
 torchaudio==2.0.2+cu118
 stable-ts==2.19.0
+openai-whisper>=20240930  # Newer version that includes large-v3-turbo model
 
 # Web framework and API
 fastapi==0.115.12

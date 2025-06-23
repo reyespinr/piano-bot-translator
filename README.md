@@ -46,7 +46,7 @@ pip install -r requirements.txt
 
 **What gets installed:**
 - `py-cord` + `PyNaCl` - Modern Discord voice channel integration
-- `stable-ts` - Enhanced Whisper transcription with better stability
+- `stable-ts` + `openai-whisper` - Enhanced Whisper transcription (pinned versions for stability)
 - `torch` + `torchaudio` - PyTorch ML framework with CUDA support
 - `numpy<2.0` - Numerical computing (version locked for compatibility)
 - `fastapi` + `uvicorn` - Modern async web server and WebSocket handling
@@ -55,6 +55,13 @@ pip install -r requirements.txt
 - `requests` - HTTP client for DeepL API
 
 The optimized requirements.txt includes specific versions and CUDA support for better performance and compatibility.
+
+**Recommended installation:**
+```bash
+# For a clean installation, especially if you've had Whisper issues:
+pip uninstall openai-whisper stable-ts -y
+pip install -r requirements.txt
+```
 
 ### 3. System Dependencies
 
@@ -237,6 +244,14 @@ logging:
 
 ### Common Issues
 
+**"cannot import name 'dtw_kernel' from 'whisper.triton_ops'"**
+- This is a known compatibility issue between Whisper and Triton operations
+- Solution: Reinstall with pinned versions:
+```bash
+pip uninstall openai-whisper stable-ts -y
+pip install -r requirements.txt
+```
+- If the issue persists, try CPU-only mode by setting `device: "cpu"` in `config.yaml`
 
 **"FFmpeg not found"**
 - Install FFmpeg and ensure it's in your system PATH

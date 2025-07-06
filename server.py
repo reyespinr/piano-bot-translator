@@ -5,11 +5,15 @@ Simplified server with modular architecture for better maintainability.
 """
 
 import asyncio
+import os
 import sys
 import traceback
 import signal
+import time
+import threading
 from pathlib import Path
 from contextlib import asynccontextmanager
+import psutil
 import uvicorn
 import discord
 from discord.ext import commands
@@ -22,16 +26,10 @@ from websocket_handler import WebSocketManager
 from translation_service import VoiceTranslator
 from cleanup import clean_temp_files
 from logging_config import get_logger
-import psutil
-import threading
-import time
 
 logger = get_logger(__name__)
 
 # Global exception handler for async tasks
-
-# Global shutdown event
-shutdown_event = asyncio.Event()
 
 
 def handle_task_exception(task):
@@ -57,48 +55,37 @@ def create_task_with_exception_handling(coro, name=None):
 
 
 def signal_handler(signum, frame):
-    """Handle termination signals."""
-    global shutdown_event
+    """Handle termination signals - trigger graceful shutdown."""
+    logger.info(
+        "🛑 Received termination signal (%s). Triggering graceful shutdown...", signum)
 
-    # Prevent multiple signal handling
-    if shutdown_event and shutdown_event.is_set():
-        logger.warning("🛑 Shutdown already in progress...")
-        # If shutdown was already triggered but didn't complete, give it more time
-        # Only force exit if we've been waiting too long
-        if not hasattr(signal_handler, '_force_exit_started'):
-            signal_handler._force_exit_started = True
-
-            def force_exit():
-                time.sleep(5)  # Give 5 more seconds
-                logger.error("❌ Graceful shutdown timed out, forcing exit...")
-                import os
+    # Don't do any Discord work here - just signal the event loop to handle it
+    try:
+        if instances.shutdown_event:
+            # This will wake up the shutdown_monitor() in the event loop
+            # The actual voice disconnect will happen there with proper async context
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # Use call_soon_threadsafe to safely signal from signal handler
+                loop.call_soon_threadsafe(instances.shutdown_event.set)
+                logger.info(
+                    "🛑 Shutdown signal sent to event loop for graceful handling")
+            else:
+                logger.warning(
+                    "🛑 Event loop not running, forcing immediate exit")
                 os._exit(1)
-
-            force_exit_thread = threading.Thread(
-                target=force_exit, daemon=True)
-            force_exit_thread.start()
-        return
-
-    logger.info(f"🛑 Received signal {signum}, initiating graceful shutdown...")
-
-    # Set the shutdown event
-    if shutdown_event:
-        shutdown_event.set()
-
-    # Set a timeout for graceful shutdown
-    def force_exit():
-        time.sleep(8)  # Give 8 seconds for graceful shutdown
-        logger.error("❌ Graceful shutdown timed out, forcing exit...")
-        import os
+        else:
+            logger.warning(
+                "🛑 No shutdown event available, forcing immediate exit")
+            os._exit(1)
+    except Exception as e:
+        logger.error(f"❌ Signal handler failed: {e}")
         os._exit(1)
 
-    force_exit_thread = threading.Thread(target=force_exit, daemon=True)
-    force_exit_thread.start()
+    # Don't force exit here - let the event loop handle graceful shutdown
 
 
-# Register signal handlers
-signal.signal(signal.SIGTERM, signal_handler)
-signal.signal(signal.SIGINT, signal_handler)
+# Signal handlers will be registered after instances are created in lifespan()
 
 # Discord bot setup
 
@@ -109,17 +96,25 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Global instances
-bot_manager = None
-websocket_manager = None
-voice_translator = None
-shutdown_event = None
+# Global instances - stored in a container that's accessible to signal handlers
+
+
+class GlobalInstances:
+    def __init__(self):
+        self.bot_manager = None
+        self.websocket_manager = None
+        self.voice_translator = None
+        self.shutdown_event = None
+
+
+# Global container
+instances = GlobalInstances()
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Handle application startup and shutdown events."""
-    global bot_manager, websocket_manager, voice_translator
+    global instances
     # Startup
     logger.info("🚀 Starting Discord Voice Translator Server...")
     try:
@@ -129,37 +124,44 @@ async def lifespan(_app: FastAPI):
         logger.info("✅ Audio file cleanup completed")
 
         # Initialize bot manager
-        bot_manager = DiscordBotManager()
+        instances.bot_manager = DiscordBotManager()
+        logger.info(
+            f"🔗 Bot manager created and assigned to global: {instances.bot_manager is not None}")
 
         # Initialize WebSocket manager
-        websocket_manager = WebSocketManager(bot_manager)
+        instances.websocket_manager = WebSocketManager(instances.bot_manager)
+        logger.info(
+            f"🔗 WebSocket manager created: {instances.websocket_manager is not None}")
 
         # Create translation callback
         async def translation_callback(user_id, text, message_type="transcription"):
-            await websocket_manager.broadcast_translation(user_id, text, message_type)
+            await instances.websocket_manager.broadcast_translation(user_id, text, message_type)
 
         # Create voice translator
-        voice_translator = VoiceTranslator(translation_callback)
+        instances.voice_translator = VoiceTranslator(translation_callback)
+        logger.info(
+            f"🔗 Voice translator created and assigned to global: {instances.voice_translator is not None}")
 
         # CRITICAL FIX: Set the WebSocket handler in voice translator IMMEDIATELY
-        voice_translator.set_websocket_handler(websocket_manager)
+        instances.voice_translator.set_websocket_handler(
+            instances.websocket_manager)
         logger.info("🔗 WebSocket handler connected to voice translator")
 
         # Set voice translator in bot manager
-        bot_manager.set_voice_translator(voice_translator)
+        instances.bot_manager.set_voice_translator(instances.voice_translator)
         # CRITICAL FIX: Verify the connection chain (updated for refactored structure)
         logger.info("🔗 Voice translator connected to bot manager")
-        if (hasattr(bot_manager, 'voice_translator') and
-            bot_manager.voice_translator and
-            hasattr(bot_manager.voice_translator, 'state') and
-            hasattr(bot_manager.voice_translator.state, 'websocket_handler') and
-                bot_manager.voice_translator.state.websocket_handler):
+        if (hasattr(instances.bot_manager, 'voice_translator') and
+            instances.bot_manager.voice_translator and
+            hasattr(instances.bot_manager.voice_translator, 'state') and
+            hasattr(instances.bot_manager.voice_translator.state, 'websocket_handler') and
+                instances.bot_manager.voice_translator.state.websocket_handler):
             logger.info(
                 "✅ Connection chain verified: bot_manager -> voice_translator -> state -> websocket_handler")
         else:
             logger.error("❌ Connection chain BROKEN!")
         global bot
-        bot = bot_manager.create_bot(translation_callback)
+        bot = instances.bot_manager.create_bot(translation_callback)
 
         # Initialize models using the unified ModelManager
         logger.info("Initializing transcription models...")
@@ -182,13 +184,13 @@ async def lifespan(_app: FastAPI):
                     logger.warning(
                         "⚠️ Model warm-up had some issues but models should still work")
                 # Broadcast ready status to all connected clients
-                if websocket_manager:
-                    await websocket_manager.broadcast_bot_status(True)
+                if instances.websocket_manager:
+                    await instances.websocket_manager.broadcast_bot_status(True)
             except Exception as e:
                 logger.error("❌ Model warm-up failed: %s", str(e))
                 # Still broadcast that bot is ready (models may work anyway)
-                if websocket_manager:
-                    await websocket_manager.broadcast_bot_status(True)
+                if instances.websocket_manager:
+                    await instances.websocket_manager.broadcast_bot_status(True)
 
         create_task_with_exception_handling(warmup_task(), "model_warmup")
 
@@ -200,8 +202,13 @@ async def lifespan(_app: FastAPI):
 
         # Start bot as background task
         create_task_with_exception_handling(
-            bot_manager.start_bot(discord_bot_token), "discord_bot")
+            instances.bot_manager.start_bot(discord_bot_token), "discord_bot")
         logger.info("✅ Discord bot startup initiated")
+
+        # NOW register signal handlers after instances are created
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+        logger.info("✅ Signal handlers registered")
 
         logger.info("🎉 Server startup completed successfully!")
 
@@ -231,13 +238,13 @@ async def lifespan(_app: FastAPI):
                     "⚠️ Some tasks did not complete cancellation within timeout")
 
         # Shutdown components in proper order
-        if voice_translator:
+        if instances.voice_translator:
             logger.info("🛑 Stopping voice translator...")
-            voice_translator.cleanup()
+            instances.voice_translator.cleanup()
 
-        if bot_manager:
+        if instances.bot_manager:
             logger.info("🛑 Stopping Discord bot...")
-            await bot_manager.stop_bot()
+            await instances.bot_manager.stop_bot()
 
         # Shutdown model manager
         if hasattr(model_manager, 'cleanup'):
@@ -261,8 +268,8 @@ app = FastAPI(
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for admin frontend communication (full control)."""
-    if websocket_manager:
-        await websocket_manager.handle_admin_connection(websocket)
+    if instances.websocket_manager:
+        await instances.websocket_manager.handle_admin_connection(websocket)
     else:
         await websocket.close(code=1011, reason="Server not ready")
 
@@ -270,8 +277,8 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.websocket("/ws/spectator")
 async def websocket_spectator_endpoint(websocket: WebSocket):
     """WebSocket endpoint for spectator connections (read-only)."""
-    if websocket_manager:
-        await websocket_manager.handle_spectator_connection(websocket)
+    if instances.websocket_manager:
+        await instances.websocket_manager.handle_spectator_connection(websocket)
     else:
         await websocket.close(code=1011, reason="Server not ready")
 
@@ -301,13 +308,13 @@ async def on_ready():
         logger.info("🎯 Discord bot is ready! Logged in as %s", bot.user)
 
         # CRITICAL FIX: Re-verify and re-establish the connection chain when bot is ready
-        global voice_translator, websocket_manager
-        if voice_translator and websocket_manager:
-            voice_translator.set_websocket_handler(websocket_manager)
+        if instances.voice_translator and instances.websocket_manager:
+            instances.voice_translator.set_websocket_handler(
+                instances.websocket_manager)
             logger.info(
                 "🔗 Re-established WebSocket handler connection after bot ready")
             # Verify the connection is working
-            if (hasattr(voice_translator.state, 'websocket_handler') and voice_translator.state.websocket_handler):
+            if (hasattr(instances.voice_translator.state, 'websocket_handler') and instances.voice_translator.state.websocket_handler):
                 logger.info("✅ WebSocket handler verified in voice translator")
             else:
                 logger.error(
@@ -334,15 +341,6 @@ async def on_disconnect():
 async def on_resumed():
     """Handle bot reconnection."""
     logger.info("🔄 Discord bot reconnected!")
-
-
-# Initialize voice translator
-async def initialize_translator():
-    """Initialize the voice translation_service."""
-    global voice_translator
-    voice_translator = VoiceTranslator(None)  # Callback will be set later
-    voice_translator.set_websocket_handler(websocket_manager)
-    return voice_translator
 
 
 def read_token():
@@ -430,8 +428,7 @@ monitor_thread.start()
 
 async def main():
     """Main application entry point."""
-    global shutdown_event
-    shutdown_event = asyncio.Event()
+    instances.shutdown_event = asyncio.Event()
 
     try:
         # Configure and start web server
@@ -452,72 +449,49 @@ async def main():
 
         # Create shutdown monitoring task
         async def shutdown_monitor():
-            await shutdown_event.wait()
-            logger.info("🛑 Shutdown event triggered, stopping server...")
+            await instances.shutdown_event.wait()
+            logger.info(
+                "🛑 Shutdown event triggered, initiating graceful shutdown...")
 
-            # Step 1: Immediately force cleanup of voice connections and workers
-            if voice_translator:
-                logger.info("🛑 Forcing voice translator cleanup...")
+            # Step 1: Use the EXACT same logic as frontend "Leave" button
+            # This is the key - we're now in proper async context!
+            if instances.bot_manager:
                 try:
-                    # Stop all transcription workers first
-                    if hasattr(voice_translator, 'state') and hasattr(voice_translator.state, 'worker_manager'):
-                        logger.info("🛑 Stopping transcription workers...")
-                        voice_translator.state.worker_manager.cleanup()
+                    logger.info(
+                        "🛑 Calling leave_voice_channel() (same as frontend Leave button)")
+                    success, msg = await instances.bot_manager.leave_voice_channel()
+                    logger.info(f"🛑 Voice leave result: {success} - {msg}")
 
-                    # Force stop all voice connections
-                    if hasattr(voice_translator, 'state') and hasattr(voice_translator.state, 'active_voices'):
-                        for guild_id, voice_client in list(voice_translator.state.active_voices.items()):
-                            try:
-                                if voice_client and voice_client.is_connected():
-                                    logger.info(
-                                        f"🛑 Forcing disconnect from guild {guild_id}")
-                                    # Stop recording first
-                                    try:
-                                        voice_client.stop_recording()
-                                    except Exception:
-                                        pass  # Ignore errors, recording may not be active
-                                    # Then disconnect
-                                    await voice_client.disconnect()
-                            except Exception as e:
-                                logger.error(
-                                    f"❌ Error forcing disconnect from guild {guild_id}: {e}")
+                    if success:
+                        logger.info(
+                            "✅ Bot successfully left voice channel during shutdown")
+                    else:
+                        logger.warning(
+                            f"⚠️ Voice leave reported failure: {msg}")
 
-                    # Then run cleanup
-                    voice_translator.cleanup()
+                except Exception as e:
+                    logger.error(f"❌ Voice leave failed during shutdown: {e}")
+
+            # Step 2: Clean up other components
+            if instances.voice_translator:
+                logger.info("🛑 Cleaning up voice translator...")
+                try:
+                    instances.voice_translator.cleanup()
                 except Exception as e:
                     logger.error(
                         f"❌ Error during voice translator cleanup: {e}")
 
-            # Step 2: Force shutdown the Discord bot
-            if bot_manager:
-                logger.info("🛑 Forcing Discord bot shutdown...")
+            # Step 3: Stop the Discord bot
+            if instances.bot_manager:
+                logger.info("🛑 Stopping Discord bot...")
                 try:
-                    # First disconnect all voice clients
-                    if bot_manager.bot and bot_manager.bot.voice_clients:
-                        for vc in bot_manager.bot.voice_clients:
-                            try:
-                                if vc.is_connected():
-                                    # Stop recording first
-                                    try:
-                                        vc.stop_recording()
-                                    except Exception:
-                                        pass  # Ignore errors, recording may not be active
-                                    # Then disconnect
-                                    await vc.disconnect()
-                            except Exception as e:
-                                logger.error(
-                                    f"❌ Error disconnecting voice client: {e}")
-
-                    # Then stop the bot
-                    await bot_manager.stop_bot()
+                    await instances.bot_manager.stop_bot()
                 except Exception as e:
                     logger.error(f"❌ Error during bot shutdown: {e}")
 
-            # Step 3: Stop the uvicorn server
+            # Step 4: Stop the uvicorn server
             server.should_exit = True
-
-            logger.info(
-                "🛑 Shutdown procedures completed, waiting for server to stop...")
+            logger.info("🛑 Shutdown procedures completed, server will stop...")
 
         shutdown_task = asyncio.create_task(shutdown_monitor())
 

@@ -30,11 +30,17 @@ logger = get_logger(__name__)
 
 # Global exception handler for async tasks
 
+# Global shutdown event
+shutdown_event = asyncio.Event()
+
 
 def handle_task_exception(task):
     """Handle exceptions from background tasks."""
     try:
         task.result()
+    except asyncio.CancelledError:
+        # This is normal during shutdown, don't log as error
+        logger.debug("📝 Task cancelled during shutdown")
     except Exception as e:
         logger.error("❌ Background task failed: %s", str(e))
         logger.error("❌ Task exception traceback: %s", traceback.format_exc())
@@ -52,9 +58,42 @@ def create_task_with_exception_handling(coro, name=None):
 
 def signal_handler(signum, frame):
     """Handle termination signals."""
+    global shutdown_event
+
+    # Prevent multiple signal handling
+    if shutdown_event and shutdown_event.is_set():
+        logger.warning("🛑 Shutdown already in progress...")
+        # If shutdown was already triggered but didn't complete, give it more time
+        # Only force exit if we've been waiting too long
+        if not hasattr(signal_handler, '_force_exit_started'):
+            signal_handler._force_exit_started = True
+
+            def force_exit():
+                time.sleep(5)  # Give 5 more seconds
+                logger.error("❌ Graceful shutdown timed out, forcing exit...")
+                import os
+                os._exit(1)
+
+            force_exit_thread = threading.Thread(
+                target=force_exit, daemon=True)
+            force_exit_thread.start()
+        return
+
     logger.info(f"🛑 Received signal {signum}, initiating graceful shutdown...")
-    # Set a flag or trigger shutdown logic
-    sys.exit(0)
+
+    # Set the shutdown event
+    if shutdown_event:
+        shutdown_event.set()
+
+    # Set a timeout for graceful shutdown
+    def force_exit():
+        time.sleep(8)  # Give 8 seconds for graceful shutdown
+        logger.error("❌ Graceful shutdown timed out, forcing exit...")
+        import os
+        os._exit(1)
+
+    force_exit_thread = threading.Thread(target=force_exit, daemon=True)
+    force_exit_thread.start()
 
 
 # Register signal handlers
@@ -74,12 +113,14 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 bot_manager = None
 websocket_manager = None
 voice_translator = None
+shutdown_event = None
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Handle application startup and shutdown events."""
-    global bot_manager, websocket_manager, voice_translator    # Startup
+    global bot_manager, websocket_manager, voice_translator
+    # Startup
     logger.info("🚀 Starting Discord Voice Translator Server...")
     try:
         # Clean up any leftover audio files first
@@ -174,10 +215,35 @@ async def lifespan(_app: FastAPI):
     logger.info("🛑 Shutting down Discord Voice Translator Server...")
 
     try:
-        if bot_manager:
-            await bot_manager.stop_bot()
+        # Cancel all running tasks first
+        tasks = [t for t in asyncio.all_tasks(
+        ) if t is not asyncio.current_task()]
+        if tasks:
+            logger.info(f"🔄 Cancelling {len(tasks)} running tasks...")
+            for task in tasks:
+                task.cancel()
+
+            # Wait for tasks to complete cancellation
+            try:
+                await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "⚠️ Some tasks did not complete cancellation within timeout")
+
+        # Shutdown components in proper order
         if voice_translator:
+            logger.info("🛑 Stopping voice translator...")
             voice_translator.cleanup()
+
+        if bot_manager:
+            logger.info("🛑 Stopping Discord bot...")
+            await bot_manager.stop_bot()
+
+        # Shutdown model manager
+        if hasattr(model_manager, 'cleanup'):
+            logger.info("🛑 Cleaning up models...")
+            await model_manager.cleanup()
+
         logger.info("✅ Server shutdown completed")
     except Exception as e:
         logger.error("❌ Shutdown error: %s", str(e))
@@ -364,6 +430,9 @@ monitor_thread.start()
 
 async def main():
     """Main application entry point."""
+    global shutdown_event
+    shutdown_event = asyncio.Event()
+
     try:
         # Configure and start web server
         config = uvicorn.Config(
@@ -378,9 +447,135 @@ async def main():
         logger.info("🌐 Server running at http://127.0.0.1:8000")
         logger.info("🎵 Discord Voice Translator is ready!")
 
-        # Start server - this will run the FastAPI app with lifespan
-        await server.serve()
+        # Create server task
+        server_task = asyncio.create_task(server.serve())
 
+        # Create shutdown monitoring task
+        async def shutdown_monitor():
+            await shutdown_event.wait()
+            logger.info("🛑 Shutdown event triggered, stopping server...")
+
+            # Step 1: Immediately force cleanup of voice connections and workers
+            if voice_translator:
+                logger.info("🛑 Forcing voice translator cleanup...")
+                try:
+                    # Stop all transcription workers first
+                    if hasattr(voice_translator, 'state') and hasattr(voice_translator.state, 'worker_manager'):
+                        logger.info("🛑 Stopping transcription workers...")
+                        voice_translator.state.worker_manager.cleanup()
+
+                    # Force stop all voice connections
+                    if hasattr(voice_translator, 'state') and hasattr(voice_translator.state, 'active_voices'):
+                        for guild_id, voice_client in list(voice_translator.state.active_voices.items()):
+                            try:
+                                if voice_client and voice_client.is_connected():
+                                    logger.info(
+                                        f"🛑 Forcing disconnect from guild {guild_id}")
+                                    # Stop recording first
+                                    try:
+                                        voice_client.stop_recording()
+                                    except Exception:
+                                        pass  # Ignore errors, recording may not be active
+                                    # Then disconnect
+                                    await voice_client.disconnect()
+                            except Exception as e:
+                                logger.error(
+                                    f"❌ Error forcing disconnect from guild {guild_id}: {e}")
+
+                    # Then run cleanup
+                    voice_translator.cleanup()
+                except Exception as e:
+                    logger.error(
+                        f"❌ Error during voice translator cleanup: {e}")
+
+            # Step 2: Force shutdown the Discord bot
+            if bot_manager:
+                logger.info("🛑 Forcing Discord bot shutdown...")
+                try:
+                    # First disconnect all voice clients
+                    if bot_manager.bot and bot_manager.bot.voice_clients:
+                        for vc in bot_manager.bot.voice_clients:
+                            try:
+                                if vc.is_connected():
+                                    # Stop recording first
+                                    try:
+                                        vc.stop_recording()
+                                    except Exception:
+                                        pass  # Ignore errors, recording may not be active
+                                    # Then disconnect
+                                    await vc.disconnect()
+                            except Exception as e:
+                                logger.error(
+                                    f"❌ Error disconnecting voice client: {e}")
+
+                    # Then stop the bot
+                    await bot_manager.stop_bot()
+                except Exception as e:
+                    logger.error(f"❌ Error during bot shutdown: {e}")
+
+            # Step 3: Stop the uvicorn server
+            server.should_exit = True
+
+            logger.info(
+                "🛑 Shutdown procedures completed, waiting for server to stop...")
+
+        shutdown_task = asyncio.create_task(shutdown_monitor())
+
+        # Wait for either server completion or shutdown signal
+        try:
+            done, pending = await asyncio.wait(
+                [server_task, shutdown_task],
+                return_when=asyncio.FIRST_COMPLETED
+            )
+        except asyncio.CancelledError:
+            logger.info(
+                "🛑 Main task was cancelled, proceeding with shutdown...")
+            pending = [server_task, shutdown_task]
+            done = set()
+
+        # Cancel any remaining tasks aggressively
+        for task in pending:
+            if not task.cancelled():
+                task.cancel()
+
+        # Wait for cancellation to complete, but with a timeout
+        if pending:
+            try:
+                await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout=3.0)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "⚠️ Some tasks did not cancel within timeout, forcing shutdown...")
+            except asyncio.CancelledError:
+                logger.info("🛑 Task cancellation was cancelled, proceeding...")
+            except Exception as e:
+                logger.warning("⚠️ Error during task cancellation: %s", str(e))
+
+        # Final cleanup - cancel all remaining tasks
+        try:
+            tasks = [task for task in asyncio.all_tasks() if not task.done()]
+            if tasks:
+                logger.info(f"🛑 Cancelling {len(tasks)} remaining tasks...")
+                for task in tasks:
+                    task.cancel()
+
+                # Wait briefly for tasks to cancel
+                try:
+                    await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=2.0)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "⚠️ Some tasks did not cancel, but proceeding with shutdown...")
+                except asyncio.CancelledError:
+                    logger.info("🛑 Final cleanup was cancelled, proceeding...")
+                except Exception as e:
+                    logger.warning(
+                        "⚠️ Error during final task cancellation: %s", str(e))
+        except Exception as e:
+            logger.warning("⚠️ Error during final cleanup: %s", str(e))
+
+        logger.info("✅ Server shutdown completed gracefully")
+
+    except asyncio.CancelledError:
+        logger.info("🛑 Main function was cancelled, shutdown complete")
     except Exception as e:
         logger.error("❌ Error in main: %s", str(e))
         logger.error("❌ Main traceback: %s", traceback.format_exc())
@@ -401,7 +596,9 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("🛑 Received keyboard interrupt")
+        logger.info("🛑 Received keyboard interrupt, shutdown completed")
+    except asyncio.CancelledError:
+        logger.info("🛑 Application was cancelled, shutdown completed")
     except Exception as e:
         logger.error("❌ Fatal error: %s", str(e))
         logger.error("❌ Fatal traceback: %s", traceback.format_exc())

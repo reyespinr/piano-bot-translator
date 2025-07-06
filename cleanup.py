@@ -85,7 +85,9 @@ def force_delete_file(filepath):
     # Try with Windows commands if on Windows
     if sys.platform == "win32":
         try:
-            subprocess.run(f'del /F "{filepath}"', shell=True, check=False)
+            # Use PowerShell syntax for better compatibility
+            subprocess.run(
+                f'Remove-Item -Path "{filepath}" -Force', shell=True, check=False)
             if not os.path.exists(filepath):
                 return True
         except (subprocess.SubprocessError, OSError):

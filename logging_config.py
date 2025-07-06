@@ -310,6 +310,12 @@ def _configure_third_party_loggers() -> None:
     for logger_name in torio_loggers:
         logging.getLogger(logger_name).setLevel(logging.WARNING)
 
+    # Suppress torchaudio debug messages (FFmpeg initialization warnings)
+    torchaudio_loggers = [
+        'torchaudio', 'torchaudio._extension', 'torchaudio._extension.utils']
+    for logger_name in torchaudio_loggers:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+
 
 def get_logger(name: str) -> logging.Logger:
     """Get a logger instance for the specified module.

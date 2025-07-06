@@ -95,7 +95,13 @@ def is_recoverable_error(error_str):
         "cannot import name 'dtw_kernel' from 'whisper.triton_ops'",
         "ImportError",
         "ModuleNotFoundError",
-        "No module named"
+        "No module named",
+        "CUDA error: invalid argument",  # GPU hardware/driver issues
+        "CUDA error: out of memory",     # GPU memory exhaustion
+        "CUDA error: device-side assert triggered",  # GPU kernel failures
+        "CUDA kernel errors might be asynchronously reported",  # General CUDA issues
+        "CUDA_LAUNCH_BLOCKING",         # CUDA debugging related
+        "TORCH_USE_CUDA_DSA"           # PyTorch CUDA debugging
     ]
 
     # Check for non-recoverable errors first
@@ -159,13 +165,47 @@ async def force_delete_file(file_path: str) -> bool:
     # Last resort: try with Windows-specific commands
     if os.name == 'nt':
         try:
-            subprocess.run(f'del /F "{file_path}"', shell=True, check=False)
+            # Use PowerShell syntax for better compatibility
+            subprocess.run(
+                f'Remove-Item -Path "{file_path}" -Force', shell=True, check=False)
             logger.debug(
-                "Attempted deletion with Windows command: %s", file_path)
+                "Attempted deletion with Windows PowerShell command: %s", file_path)
             return not os.path.exists(file_path)
         except (OSError, subprocess.SubprocessError) as e:
-            logger.error("Windows command deletion failed: %s", str(e))
+            logger.error(
+                "Windows PowerShell command deletion failed: %s", str(e))
 
     logger.warning(
         "Failed to delete file after multiple attempts: %s", file_path)
+    return False
+
+
+def check_cuda_health():
+    """Check CUDA availability and health."""
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return False, "CUDA not available"
+
+        # Try a simple CUDA operation
+        device = torch.device('cuda')
+        test_tensor = torch.zeros(1, device=device)
+        _ = test_tensor + 1  # Simple operation to test CUDA
+
+        return True, f"CUDA healthy on device {torch.cuda.current_device()}"
+    except Exception as e:
+        return False, f"CUDA health check failed: {str(e)}"
+
+
+def clear_cuda_cache():
+    """Clear CUDA cache to free up memory."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()  # Wait for operations to complete
+            logger.info("🧹 CUDA cache cleared")
+            return True
+    except Exception as e:
+        logger.warning("Failed to clear CUDA cache: %s", str(e))
     return False

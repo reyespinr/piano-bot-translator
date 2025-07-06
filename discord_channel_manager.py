@@ -4,6 +4,7 @@ Discord channel operations manager.
 Handles voice channel joining, leaving, and user state management.
 """
 import asyncio
+import logging
 from logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -21,27 +22,56 @@ class DiscordChannelManager:
         try:
             channel = self.bot_manager.bot.get_channel(int(channel_id))
             if not channel:
-                # Leave current channel if connected
                 return False, "Channel not found"
+
+            # Check if already connected to the same channel
+            if (self.bot_manager.bot.voice_clients and
+                    self.bot_manager.bot.voice_clients[0].channel.id == channel.id):
+                logger.info("Already connected to channel: %s", channel.name)
+                return True, f"Already connected to {channel.name}"
+
+            # Leave current channel if connected to a different one
             await self._leave_current_channel()
 
-            # Join new channel with timeout and reconnect settings
-            voice_client = await channel.connect(
-                timeout=60.0,  # Increase connection timeout
-                reconnect=True  # Enable auto-reconnect
-            )
+            # Reduce delay for faster connection
+            await asyncio.sleep(0.5)
+
+            logger.info("Attempting to connect to channel: %s (ID: %s)",
+                        channel.name, channel.id)
+
+            # Join new channel with increased timeout and retry logic
+            try:
+                voice_client = await asyncio.wait_for(
+                    channel.connect(timeout=30.0, reconnect=True),
+                    timeout=35.0  # Overall timeout wrapper
+                )
+            except asyncio.TimeoutError:
+                logger.error("Connection to voice channel timed out")
+                return False, "Connection timeout - try again"
+
+            logger.info(
+                "Successfully connected to voice channel: %s", channel.name)
 
             # Set deaf/mute status after connecting to stay "active"
             if voice_client.guild.me:
                 try:
-                    await voice_client.guild.me.edit(deafen=False, mute=False)
+                    await asyncio.wait_for(
+                        voice_client.guild.me.edit(deafen=False, mute=False),
+                        timeout=5.0
+                    )
                     logger.debug(
                         "Set bot as undeafened and unmuted to stay active")
                 except Exception as e:
+                    # Quick setup without delays
                     logger.warning(
                         "Could not set deaf/mute status: %s", str(e))
+            await self._setup_channel_connection_fast(channel, voice_client)
 
-            await self._setup_channel_connection(channel)
+            # Verify connection stability
+            if not await self._ensure_connection_stability(voice_client):
+                logger.error("Connection unstable, aborting setup")
+                await voice_client.disconnect()
+                return False, "Connection unstable - try again"
 
             # Initialize user processing for channel members
             await self._initialize_channel_users(channel)
@@ -65,14 +95,27 @@ class DiscordChannelManager:
     async def _leave_current_channel(self):
         """Leave the current voice channel if connected."""
         if self.bot_manager.bot.voice_clients:
+            current_voice_client = self.bot_manager.bot.voice_clients[0]
+            channel_name = current_voice_client.channel.name if current_voice_client.channel else "Unknown"
+
+            logger.info("Leaving current voice channel: %s", channel_name)
+
             # Stop listening if active
             if (self.bot_manager.voice_translator and
                 hasattr(self.bot_manager.voice_translator, 'state') and
                     self.bot_manager.voice_translator.state.is_listening):
-                await self.bot_manager.voice_translator.stop_listening(
-                    self.bot_manager.bot.voice_clients[0])
+                logger.debug("Stopping listening before disconnecting...")
+                await self.bot_manager.voice_translator.stop_listening(current_voice_client)
 
-            await self.bot_manager.bot.voice_clients[0].disconnect()
+            # Disconnect from voice channel
+            await current_voice_client.disconnect()
+            logger.info(
+                "Successfully disconnected from voice channel: %s", channel_name)
+
+            # Clear voice translator state
+            if self.bot_manager.voice_translator:
+                self.bot_manager.voice_translator.state.current_channel = None
+                self.bot_manager.voice_translator.state.voice_client = None
 
     async def _setup_channel_connection(self, channel):
         """Set up the voice channel connection."""
@@ -83,16 +126,36 @@ class DiscordChannelManager:
         # Add delay to ensure Discord updates member list
         await asyncio.sleep(0.5)
 
+    async def _setup_channel_connection_fast(self, channel, voice_client):
+        """Set up the voice channel connection quickly."""
+        # Store current channel and voice client in voice translator
+        if self.bot_manager.voice_translator:
+            self.bot_manager.voice_translator.state.current_channel = channel
+            self.bot_manager.voice_translator.state.voice_client = voice_client
+
+        logger.debug(
+            "Channel connection setup completed for: %s", channel.name)
+
     async def _initialize_channel_users(self, channel):
         """Initialize user processing states for all connected users."""
-        connected_users = [
-            member for member in channel.members if not member.bot]
+        try:
+            # Quick user discovery
+            connected_users = [
+                member for member in channel.members if not member.bot]
 
-        # Log channel member details
-        self._log_channel_details(channel, connected_users)
+            logger.info("👥 Found %d users in channel: %s",
+                        len(connected_users), channel.name)
 
-        # Set up user processing states
-        await self._setup_user_processing_states(connected_users)
+            # Fast user processing setup (no detailed logging during connection)
+            await self._setup_user_processing_states_fast(connected_users)
+
+            # Log details after setup is complete
+            if logger.isEnabledFor(logging.DEBUG):
+                self._log_channel_details(channel, connected_users)
+
+        except Exception as e:
+            logger.error("Error initializing channel users: %s", str(e))
+            # Don't fail the entire connection for user setup issues
 
     def _log_channel_details(self, channel, connected_users):
         """Log detailed information about channel members."""
@@ -142,6 +205,28 @@ class DiscordChannelManager:
                     len(self.bot_manager.user_processing_enabled),
                     list(self.bot_manager.user_processing_enabled.keys()))
 
+    async def _setup_user_processing_states_fast(self, connected_users):
+        """Fast setup of user processing states without detailed logging."""
+        current_user_ids = set()
+
+        for member in connected_users:
+            user_id = str(member.id)
+            current_user_ids.add(user_id)
+
+            if user_id not in self.bot_manager.user_processing_enabled:
+                self.bot_manager.user_processing_enabled[user_id] = True
+
+        # Remove processing settings for users not in the new channel
+        await self._cleanup_old_users(current_user_ids)
+
+        # Update voice translator settings
+        if self.bot_manager.voice_translator:
+            self.bot_manager.voice_translator.state.user_processing_enabled = (
+                self.bot_manager.user_processing_enabled.copy())
+
+        logger.info("🔊 Processing enabled for %d users",
+                    len(self.bot_manager.user_processing_enabled))
+
     async def _cleanup_old_users(self, current_user_ids):
         """Remove processing settings for users not in the current channel."""
         users_to_remove = []
@@ -184,3 +269,20 @@ class DiscordChannelManager:
         logger.debug(
             "🔍 get_connected_users: Returning %d users: %s", len(users), users)
         return users
+
+    async def _ensure_connection_stability(self, voice_client):
+        """Ensure the voice connection remains stable."""
+        try:
+            # Check if voice client is still connected
+            if not voice_client.is_connected():
+                logger.warning("Voice client disconnected during setup")
+                return False
+
+            # Send a keep-alive by checking latency
+            latency = voice_client.latency
+            logger.debug("Voice connection latency: %.2fms", latency * 1000)
+
+            return True
+        except Exception as e:
+            logger.warning("Connection stability check failed: %s", str(e))
+            return False

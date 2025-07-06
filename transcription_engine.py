@@ -14,7 +14,7 @@ import uuid
 from typing import Tuple, Optional, Any
 from dataclasses import dataclass
 import torch
-from audio_processing_utils import COMMON_HALLUCINATIONS, is_recoverable_error
+from audio_processing_utils import COMMON_HALLUCINATIONS, is_recoverable_error, check_cuda_health, clear_cuda_cache
 from model_manager import model_manager
 from logging_config import get_logger
 
@@ -97,6 +97,12 @@ class TranscriptionEngine:
                         request, model_lock, model_display_name, retry_count, error_str)
                     continue
                 else:
+                    # Check if this is a CUDA error and try recovery
+                    if "CUDA error" in error_str:
+                        logger.warning("🔥 [%s] CUDA error detected, attempting recovery: %s",
+                                       request.transcription_id, error_str)
+                        self._attempt_cuda_recovery()
+
                     logger.error("💥 [%s] Non-recoverable error or max retries exceeded: %s",
                                  request.transcription_id, error_str)
                     return None
@@ -180,6 +186,26 @@ class TranscriptionEngine:
 
         except Exception as e:
             logger.warning("Failed to reset model state: %s", str(e))
+
+    def _attempt_cuda_recovery(self):
+        """Attempt to recover from CUDA errors by clearing cache and checking health."""
+        try:
+            logger.info("🔧 Attempting CUDA recovery...")
+
+            # Check CUDA health first
+            is_healthy, health_message = check_cuda_health()
+            logger.info("🔍 CUDA health check: %s", health_message)
+
+            if is_healthy:
+                # Clear CUDA cache to free up memory
+                clear_cuda_cache()
+                logger.info("✅ CUDA recovery completed - cache cleared")
+            else:
+                logger.error(
+                    "❌ CUDA recovery failed - GPU not healthy: %s", health_message)
+
+        except Exception as e:
+            logger.error("❌ CUDA recovery attempt failed: %s", str(e))
 
 
 class ResultProcessor:
@@ -400,7 +426,8 @@ async def transcribe_with_model_refactored(audio_file: str, model: Any, model_na
 
         # Extract text and language from result
         transcribed_text, detected_language = ResultProcessor.extract_result_data(
-            result, request.transcription_id)        # Handle Austrian German misidentified as Icelandic
+            result, request.transcription_id)
+        # Handle Austrian German misidentified as Icelandic
         transcribed_text, detected_language, result = await ResultProcessor.handle_icelandic_detection(
             result, transcribed_text, detected_language, request, model_lock)
 

@@ -303,7 +303,26 @@ class VoiceTranslator:
             for guild_id, voice_client in list(self.state.active_voices.items()):
                 try:
                     if voice_client.is_connected():
-                        asyncio.create_task(self.stop_listening(voice_client))
+                        # Try to stop listening synchronously first
+                        try:
+                            # Force stop the sink if active
+                            if self.state.sink:
+                                self.state.sink.cleanup()
+
+                            # Create a task to stop listening, but don't wait for it
+                            asyncio.create_task(
+                                self.stop_listening(voice_client))
+                        except Exception as e:
+                            logger.error(
+                                f"Error creating stop listening task for guild {guild_id}: {e}")
+
+                        # Force disconnect the voice client
+                        try:
+                            asyncio.create_task(voice_client.disconnect())
+                        except Exception as e:
+                            logger.error(
+                                f"Error creating disconnect task for guild {guild_id}: {e}")
+
                 except (AttributeError, ConnectionError) as e:
                     logger.error(
                         "Error during cleanup for guild %s: %s", guild_id, str(e))

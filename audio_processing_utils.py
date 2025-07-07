@@ -28,7 +28,7 @@ CLEANUP_DELAY = 0.5
 #     "got it", "makes sense", "sounds good", "sounds great", "sounds cool"
 # }
 COMMON_HALLUCINATIONS = {
-    "thank you", "thanks", "thank", "um", "hmm"
+    "thank you", "thanks", "thank", "um", "hmm", "I'm sorry", "sorry"
 }
 
 
@@ -178,6 +178,19 @@ async def force_delete_file(file_path: str) -> bool:
     logger.warning(
         "Failed to delete file after multiple attempts: %s", file_path)
     return False
+
+
+def safe_remove_file(file_path: str) -> bool:
+    """Safely remove a file with error handling."""
+    try:
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
+            logger.debug("Removed file: %s", os.path.basename(file_path))
+            return True
+        return False
+    except (OSError, PermissionError) as e:
+        logger.warning("Failed to remove file %s: %s", file_path, str(e))
+        return False
 
 
 def check_cuda_health():

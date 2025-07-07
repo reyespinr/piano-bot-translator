@@ -9,6 +9,7 @@ import json
 import traceback
 from typing import Dict, Any
 from fastapi import WebSocket
+from frontend_state_manager import frontend_state_manager
 from logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -42,6 +43,14 @@ class WebSocketMessageRouter:
                 await self._handle_toggle_listen(websocket)
             elif command == "toggle_user":
                 await self._handle_toggle_user(websocket, message)
+            elif command == "set_language":
+                await self._handle_set_language(websocket, message)
+            elif command == "get_languages":
+                await self._handle_get_languages(websocket)
+            elif command == "toggle_temporal_ordering":
+                await self._handle_toggle_temporal_ordering(websocket, message)
+            elif command == "get_frontend_state":
+                await self._handle_get_frontend_state(websocket)
             else:
                 logger.warning("Unknown command: %s", command)
 
@@ -307,3 +316,86 @@ class WebSocketMessageRouter:
             logger.warning("Failed to reconstruct user list: %s", str(e))
 
         return []
+
+    async def _handle_set_language(self, websocket: WebSocket, message: Dict[str, Any]):
+        """Handle language selection from frontend dropdown."""
+        try:
+            language_code = message.get("language_code")
+            success = frontend_state_manager.set_language_override(
+                language_code)
+
+            if success:
+                # Broadcast language change to all connected clients
+                response = {
+                    "type": "language_changed",
+                    "language_code": language_code,
+                    "language_name": next((lang["name"] for lang in frontend_state_manager.supported_languages
+                                           if lang["code"] == language_code), "Auto-detect")
+                }
+                await self.broadcaster.broadcast_to_all(response)
+                logger.info("🌍 Language override set to: %s",
+                            language_code or "Auto-detect")
+            else:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": f"Invalid language code: {language_code}"
+                })
+        except Exception as e:
+            logger.error("Error handling set_language: %s", str(e))
+            await websocket.send_json({
+                "type": "error",
+                "message": "Failed to set language"
+            })
+
+    async def _handle_get_languages(self, websocket: WebSocket):
+        """Handle request for supported languages list."""
+        try:
+            response = {
+                "type": "languages_list",
+                "languages": frontend_state_manager.get_supported_languages(),
+                "current_language": frontend_state_manager.get_language_override()
+            }
+            await websocket.send_json(response)
+        except Exception as e:
+            logger.error("Error handling get_languages: %s", str(e))
+            await websocket.send_json({
+                "type": "error",
+                "message": "Failed to get languages"
+            })
+
+    async def _handle_toggle_temporal_ordering(self, websocket: WebSocket, message: Dict[str, Any]):
+        """Handle temporal ordering toggle from frontend."""
+        try:
+            enabled = message.get("enabled", True)
+            frontend_state_manager.set_temporal_ordering(enabled)
+
+            # Broadcast temporal ordering change to all connected clients
+            response = {
+                "type": "temporal_ordering_changed",
+                "enabled": enabled
+            }
+            await self.broadcaster.broadcast_to_all(response)
+            logger.info("⏰ Temporal ordering %s",
+                        "enabled" if enabled else "disabled")
+        except Exception as e:
+            logger.error("Error handling toggle_temporal_ordering: %s", str(e))
+            await websocket.send_json({
+                "type": "error",
+                "message": "Failed to toggle temporal ordering"
+            })
+
+    async def _handle_get_frontend_state(self, websocket: WebSocket):
+        """Handle request for current frontend state."""
+        try:
+            state = frontend_state_manager.get_state_for_frontend()
+            response = {
+                "type": "frontend_state",
+                **state
+            }
+            await websocket.send_json(response)
+        except Exception as e:
+            logger.error("Error handling get_frontend_state: %s", str(e))
+            await websocket.send_json({
+                "type": "error",
+                "message": "Failed to get frontend state"
+            })

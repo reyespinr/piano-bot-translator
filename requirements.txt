@@ -5,18 +5,26 @@
 git+https://github.com/DA-344/pycord.git@fix/voice-issues
 PyNaCl>=1.4.0
 
-# Machine learning and transcription - compatible stable versions for best quality
-numpy<2.0  # Required for whisper model compatibility
---extra-index-url https://download.pytorch.org/whl/cu118
-torch==2.0.1+cu118
-torchaudio==2.0.2+cu118
-stable-ts>=2.19.0  # Latest stable version
-openai-whisper>=20240930  # Latest compatible version with stable-ts 2.19.0
+# Machine learning and transcription - FASTER WHISPER with CUDA acceleration
+# IMPORTANT: These exact versions are WORKING with CUDA 12.1 + cuDNN 9.1 - DO NOT CHANGE!
+numpy<2.0  # Required for faster-whisper model compatibility
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.5.1+cu121      # WORKING: CUDA 12.1 with cuDNN 9.1.0 (90100)
+torchaudio==2.5.1+cu121  # WORKING: Compatible with above torch version
+faster-whisper==1.1.1    # WORKING: Latest version with bug fixes
+ctranslate2==4.5.0       # WORKING: Compatible with cuDNN 9.1 (downgraded from 4.6.0)
+
+# Core dependencies (automatically installed by faster-whisper, but pinned for stability)
+tokenizers>=0.13,<1      # Text tokenization
+huggingface-hub>=0.13    # Model downloads
 
 # Web framework and API
 fastapi>=0.115.12
 uvicorn[standard]
 websockets>=15.0.1
+
+# System monitoring and utilities
+psutil>=7.0.0            # System process monitoring (required by server.py)
 
 # Configuration management
 PyYAML==6.0.1

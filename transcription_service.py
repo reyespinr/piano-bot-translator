@@ -1,80 +1,83 @@
 """
-Core transcription functionality using Whisper models.
+Core transcription functionality using faster-whisper models.
 
-This module handles the actual transcription of audio files using the loaded
-Whisper models, with intelligent routing between accurate and fast models.
-Now uses the unified ModelManager for better organization.
-
-REFACTORED: Large functions have been broken down into modular components
-in transcription_engine.py for better maintainability and testing.
+This module provides transcription services using faster-whisper with intelligent
+model routing between accurate and fast models based on audio characteristics.
 """
+import time
 import traceback
 import uuid
 import audio_processing_utils
-from model_manager import model_manager
+from model_manager import faster_whisper_model_manager
+from transcription_engine import faster_whisper_transcribe_with_model
 from logging_config import get_logger
-from transcription_engine import transcribe_with_model_refactored
 
 logger = get_logger(__name__)
 
 
-async def transcribe(audio_file, current_queue_size=0, concurrent_requests=0, active_transcriptions=0):
+async def faster_whisper_transcribe(audio_file, current_queue_size=0, concurrent_requests=0,
+                                    active_transcriptions=0, force_language=None):
     """
-    Main transcription function with intelligent model routing.
+    Main faster-whisper transcription function with intelligent model routing.
 
     Args:
         audio_file: Path to audio file to transcribe
         current_queue_size: Current queue size for smart routing
         concurrent_requests: Number of concurrent requests
         active_transcriptions: Number of active transcriptions
+        force_language: Optional language code to force (e.g., "en", "de")
 
     Returns:
         tuple: (transcribed_text, detected_language)
     """
     transcription_id = str(uuid.uuid4())[:8]
-    logger.debug("🎬 [%s] ENTRY: transcribe() called for file: %s",
+    logger.debug("🎬 [%s] ENTRY: faster_whisper_transcribe() called for file: %s",
                  transcription_id, audio_file)
 
-    try:        # Load models using the new model manager
-        logger.debug("🔧 [%s] Loading models...", transcription_id)
+    try:
+        # Load models using the faster-whisper model manager
+        logger.debug("🔧 [%s] Loading faster-whisper models...",
+                     transcription_id)
 
         # Check if models are loaded, if not, initialize them
-        stats = model_manager.get_stats()
+        stats = faster_whisper_model_manager.get_stats()
         if not stats["models_loaded"]:
             logger.warning(
-                "[%s] Models not loaded! Initializing...", transcription_id)
-            success = await model_manager.initialize_models(warm_up=False)
+                "[%s] Faster-whisper models not loaded! Initializing...", transcription_id)
+            success = await faster_whisper_model_manager.initialize_models(warm_up=False)
             if not success:
-                logger.error("[%s] Failed to initialize models!",
+                logger.error("[%s] Failed to initialize faster-whisper models!",
                              transcription_id)
                 return "", "error"
 
         # Get models from model manager
-        model_accurate, model_fast_pool = model_manager.get_models()
+        model_accurate, model_fast_pool = faster_whisper_model_manager.get_models()
 
         # Determine model routing based on audio characteristics and system load
         use_fast = should_use_fast_model(
             audio_file, current_queue_size, concurrent_requests, active_transcriptions)
 
         if use_fast:
-            logger.info("🚀 [%s] Using FAST model...", transcription_id)
-            fast_model, fast_lock, selected_model_index = model_manager.select_fast_model()
+            logger.info(
+                "🚀 [%s] Using FAST faster-whisper model...", transcription_id)
+            fast_model, fast_lock, selected_model_index = faster_whisper_model_manager.select_fast_model()
             if fast_model is None:
                 logger.warning(
                     "[%s] No fast models available, falling back to accurate", transcription_id)
-                model_accurate, accurate_lock = model_manager.get_accurate_model()
-                transcribed_text, detected_language, result = await transcribe_with_model_refactored(
-                    audio_file, model_accurate, "accurate"
+                model_accurate, accurate_lock = faster_whisper_model_manager.get_accurate_model()
+                transcribed_text, detected_language, result = await faster_whisper_transcribe_with_model(
+                    audio_file, model_accurate, "accurate", force_language=force_language
                 )
             else:
-                transcribed_text, detected_language, result = await transcribe_with_model_refactored(
-                    audio_file, fast_model, "fast", selected_model_index
+                transcribed_text, detected_language, result = await faster_whisper_transcribe_with_model(
+                    audio_file, fast_model, "fast", selected_model_index, force_language=force_language
                 )
         else:
-            logger.info("🎯 [%s] Using ACCURATE model...", transcription_id)
-            model_accurate, accurate_lock = model_manager.get_accurate_model()
-            transcribed_text, detected_language, result = await transcribe_with_model_refactored(
-                audio_file, model_accurate, "accurate"
+            logger.info(
+                "🎯 [%s] Using ACCURATE faster-whisper model...", transcription_id)
+            model_accurate, accurate_lock = faster_whisper_model_manager.get_accurate_model()
+            transcribed_text, detected_language, result = await faster_whisper_transcribe_with_model(
+                audio_file, model_accurate, "accurate", force_language=force_language
             )
 
         # Return the transcription results
@@ -83,7 +86,7 @@ async def transcribe(audio_file, current_queue_size=0, concurrent_requests=0, ac
         return transcribed_text, detected_language
 
     except Exception as e:
-        logger.error("❌ [%s] Error in transcribe(): %s",
+        logger.error("❌ [%s] Error in faster_whisper_transcribe(): %s",
                      transcription_id, str(e))
         logger.error("❌ [%s] Transcribe error traceback: %s",
                      transcription_id, traceback.format_exc())
@@ -98,33 +101,35 @@ def should_use_fast_model(audio_file_path, current_queue_size=0, concurrent_requ
         audio_file_path)
 
     # Get current system state from model manager
-    stats = model_manager.get_stats()
+    stats = faster_whisper_model_manager.get_stats()
     accurate_busy = stats["accurate_busy"]
     # DEBUG: Add detailed logging with pool information
     available_fast_models = stats["fast_available"]
-    logger.debug("🔍 Routing decision: duration=%.1fs, accurate_busy=%s, concurrent=%d, active=%d, queue=%d, fast_available=%d/%d",
+    logger.debug("🔍 Routing decision (faster-whisper): duration=%.1fs, accurate_busy=%s, concurrent=%d, active=%d, queue=%d, fast_available=%d/%d",
                  duration, accurate_busy, concurrent_requests, active_transcriptions, current_queue_size,
                  available_fast_models, stats["fast_models"])
 
     # AGGRESSIVE ROUTING: If accurate model is busy, route to fast models
     if accurate_busy and duration < 3.0 and available_fast_models > 0:
-        logger.info("🚀 Routing audio (%.1fs) to FAST model pool (accurate model busy, %d models available)",
+        logger.info("🚀 Routing audio (%.1fs) to FAST faster-whisper model pool (accurate model busy, %d models available)",
                     duration, available_fast_models)
-        model_manager.update_stats(fast_uses=stats["fast_uses"] + 1)
+        faster_whisper_model_manager.update_stats(
+            fast_uses=stats["fast_uses"] + 1)
         return True
 
     # CONCURRENT PROCESSING: If we have multiple ACTIVE transcriptions and fast models available
     if active_transcriptions >= 1 and duration < 2.0 and available_fast_models > 0:
-        logger.info("⚡ Concurrent processing (%d active transcriptions), routing short audio (%.1fs) to FAST model pool (%d available)",
+        logger.info("⚡ Concurrent processing (%d active transcriptions), routing short audio (%.1fs) to FAST faster-whisper model pool (%d available)",
                     active_transcriptions, duration, available_fast_models)
-        model_manager.update_stats(fast_uses=stats["fast_uses"] + 1)
+        faster_whisper_model_manager.update_stats(
+            fast_uses=stats["fast_uses"] + 1)
         return True
 
     # QUEUE-BASED ROUTING: High queue load - use fast models more aggressively
     if current_queue_size > 2 and duration < 2.5 and available_fast_models > 0:
-        logger.info("🔥 Queue load (%d), routing audio (%.1fs) to FAST model pool (%d available)",
+        logger.info("🔥 Queue load (%d), routing audio (%.1fs) to FAST faster-whisper model pool (%d available)",
                     current_queue_size, duration, available_fast_models)
-        model_manager.update_stats(
+        faster_whisper_model_manager.update_stats(
             fast_uses=stats["fast_uses"] + 1,
             queue_overflows=stats["queue_overflows"] + 1
         )
@@ -132,21 +137,107 @@ def should_use_fast_model(audio_file_path, current_queue_size=0, concurrent_requ
 
     # LOAD BALANCING: If we have multiple fast models available, use them more often
     if available_fast_models >= 2 and duration < 3.0:
-        logger.info("⚖️ Load balancing: routing audio (%.1fs) to FAST model pool (%d models available)",
+        logger.info("⚖️ Load balancing: routing audio (%.1fs) to FAST faster-whisper model pool (%d models available)",
                     duration, available_fast_models)
-        model_manager.update_stats(fast_uses=stats["fast_uses"] + 1)
+        faster_whisper_model_manager.update_stats(
+            fast_uses=stats["fast_uses"] + 1)
         return True
 
     # EVERY 3rd SHORT CLIP: Route every 3rd short audio to fast model for load balancing
     total_uses = stats["accurate_uses"] + stats["fast_uses"]
     if duration < 1.5 and total_uses > 0 and total_uses % 3 == 0 and available_fast_models > 0:
         logger.info(
-            "⚖️ Periodic load balancing: routing short audio (%.1fs) to FAST model pool (every 3rd)", duration)
-        model_manager.update_stats(fast_uses=stats["fast_uses"] + 1)
+            "⚖️ Periodic load balancing: routing short audio (%.1fs) to FAST faster-whisper model pool (every 3rd)", duration)
+        faster_whisper_model_manager.update_stats(
+            fast_uses=stats["fast_uses"] + 1)
         return True
 
     # Default: Use accurate model for best quality
-    logger.info("🎯 Routing audio (%.1fs) to ACCURATE model (concurrent: %d, active: %d, queue: %d, fast_available: %d)",
+    logger.info("🎯 Routing audio (%.1fs) to ACCURATE faster-whisper model (concurrent: %d, active: %d, queue: %d, fast_available: %d)",
                 duration, concurrent_requests, active_transcriptions, current_queue_size, available_fast_models)
-    model_manager.update_stats(accurate_uses=stats["accurate_uses"] + 1)
+    faster_whisper_model_manager.update_stats(
+        accurate_uses=stats["accurate_uses"] + 1)
     return False
+
+
+async def transcribe(audio_file, current_queue_size=0, concurrent_requests=0, active_transcriptions=0,
+                     force_language=None, audio_timestamp=None):
+    """
+    Main transcription function with faster-whisper backend.
+
+    This is a simplified wrapper that maintains API compatibility but uses faster-whisper.
+
+    Args:
+        audio_file: Path to audio file to transcribe
+        current_queue_size: Current queue size (for compatibility, not used)
+        concurrent_requests: Number of concurrent requests (for compatibility, not used)
+        active_transcriptions: Number of active transcriptions (for compatibility, not used)
+        force_language: Optional language code to force (e.g., "en", "de", "es")
+        audio_timestamp: Timestamp when audio recording started (for temporal alignment)
+
+    Returns:
+        tuple: (transcribed_text, detected_language, result_dict)
+    """
+    session_id = str(uuid.uuid4())[:8]
+    logger.info("🎯 [%s] Starting transcription for: %s",
+                session_id, audio_file)
+
+    try:
+        # Get stats before transcription
+        stats = faster_whisper_model_manager.get_stats()
+
+        # Check if models are initialized
+        if not stats.get("models_loaded", False):
+            logger.warning(
+                "Models not initialized, attempting to initialize...")
+            success = await faster_whisper_model_manager.initialize_models(warm_up=False)
+            if not success:
+                raise Exception("Failed to initialize faster-whisper models")
+
+        # Get audio duration for logging
+        duration = audio_processing_utils.get_audio_duration_from_file(
+            audio_file)
+        logger.info("🎵 [%s] Audio duration: %.2fs", session_id, duration)
+
+        # Set timestamp if not provided
+        if audio_timestamp is None:
+            audio_timestamp = time.time()
+
+        # Transcribe using faster-whisper with language override
+        transcribed_text, detected_language = await faster_whisper_transcribe(
+            audio_file, force_language=force_language)
+
+        # Create result dict with temporal information
+        result = {
+            "text": transcribed_text,
+            "language": detected_language,
+            "session_id": session_id,
+            "audio_duration": duration,
+            "audio_timestamp": audio_timestamp,
+            "processing_completed": time.time(),
+            "forced_language": force_language,
+            "model_type": "faster-whisper"
+        }
+
+        logger.info("✅ [%s] Transcription completed: '%s' (lang: %s)",
+                    session_id, transcribed_text[:50], detected_language)
+
+        return transcribed_text, detected_language, result
+
+    except Exception as e:
+        logger.error("❌ [%s] Transcription failed: %s", session_id, str(e))
+        logger.error("❌ [%s] Traceback: %s",
+                     session_id, traceback.format_exc())
+
+        # Return empty result on failure
+        error_result = {
+            "text": "",
+            "language": "unknown",
+            "session_id": session_id,
+            "audio_timestamp": audio_timestamp,
+            "processing_completed": time.time() if 'time' in locals() else None,
+            "forced_language": force_language,
+            "error": str(e),
+            "model_type": "faster-whisper"
+        }
+        return "", "unknown", error_result

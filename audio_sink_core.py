@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Callable, Tuple
 
 import translation_utils
+from frontend_state_manager import frontend_state_manager
 from logging_config import get_logger
 from audio_worker_manager import AudioWorkerManager
 from audio_session_manager import AudioSession
@@ -303,14 +304,41 @@ class TranscriptionProcessor:
 
     @staticmethod
     async def _perform_transcription(audio_file: str, user: str, gui_callback: Callable) -> Tuple[str, str]:
-        """Perform the actual transcription with error handling."""
+        """Perform the actual transcription with error handling and language override."""
         try:
             logger.debug(
                 "📞 Calling translation_utils.transcribe for file: %s", audio_file)
-            transcribed_text, detected_language = await translation_utils.transcribe(audio_file)
-            logger.debug("🎯 Transcription result for user %s: text='%s', language=%s",
-                         user, transcribed_text, detected_language)
-            return transcribed_text, detected_language
+
+            # Get language override from frontend state
+            force_language = frontend_state_manager.get_language_override()
+            audio_timestamp = time.time()
+
+            # Use enhanced transcription with timestamp info
+            transcribed_text, detected_language, result = await translation_utils.transcribe_with_timestamp(
+                audio_file, force_language=force_language, audio_timestamp=audio_timestamp
+            )
+
+            logger.debug("🎯 Enhanced transcription result for user %s: text='%s', language=%s (forced: %s)",
+                         user, transcribed_text, detected_language, force_language)
+
+            # Handle temporal ordering
+            should_send_immediately, pending_message = await frontend_state_manager.add_message_for_ordering(
+                user_id=user,
+                text=transcribed_text,
+                language=detected_language,
+                audio_timestamp=result.get("audio_timestamp", audio_timestamp),
+                processing_completed=result.get(
+                    "processing_completed", time.time()),
+                forced_language=force_language
+            )
+
+            if should_send_immediately:
+                return transcribed_text, detected_language
+            else:
+                # Message is being held for temporal ordering
+                logger.debug(
+                    "⏰ Message for user %s held for temporal ordering", user)
+                return "", ""  # Return empty to indicate message is pending
 
         except Exception as e:
             logger.error("Transcription failed for user %s: %s", user, str(e))

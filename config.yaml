@@ -20,7 +20,7 @@ models:
   accurate:
     name: "large-v3-turbo"
     # name: "base"
-    count: 1
+    count: 3
     description: "High-accuracy transcription"
     device: "cuda"
     warmup_timeout: 30
@@ -28,7 +28,7 @@ models:
   # Fast tier - small, fast models for speed and parallelization  
   fast:
     name: "base"
-    count: 3
+    count: 1
     description: "Fast parallel transcription"
     device: "cuda"
     warmup_timeout: 30
@@ -40,3 +40,10 @@ audio:
   
 discord:
   # Discord bot configuration will go here
+
+translation:
+  # DeepL API configuration
+  deepl_api_key: "5ac935ea-9ed2-40a7-bd4d-8153c941c79f:fx"  # Replace with your DeepL API key
+  deepl_api_url: "https://api-free.deepl.com/v2/translate"   # Use https://api.deepl.com/v2/translate for paid accounts
+  target_language: "EN"  # Target language for translation
+  timeout: 10  # Request timeout in seconds

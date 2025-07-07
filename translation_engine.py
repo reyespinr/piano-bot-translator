@@ -194,20 +194,23 @@ class ModelManager:
         """Load and validate models."""
         try:
             logger.info("Loading translation models...")
-            from model_manager import model_manager
+            from model_manager import faster_whisper_model_manager
 
             # Check if models are already loaded
-            if model_manager.stats["models_loaded"]:
-                logger.info("✅ Models already loaded via ModelManager")
+            if faster_whisper_model_manager.stats["models_loaded"]:
+                logger.info(
+                    "✅ Models already loaded via Faster-Whisper ModelManager")
                 return True, "Models already loaded"
 
             # Initialize models
-            success = await model_manager.initialize_models(warm_up=False)
+            success = await faster_whisper_model_manager.initialize_models(warm_up=False)
             if success:
-                logger.info("✅ Models loaded successfully via ModelManager")
+                logger.info(
+                    "✅ Models loaded successfully via Faster-Whisper ModelManager")
                 return True, "Models loaded successfully"
 
-            logger.error("❌ Failed to load models via ModelManager")
+            logger.error(
+                "❌ Failed to load models via Faster-Whisper ModelManager")
             return False, "Failed to load models"
 
         except Exception as e:
@@ -215,8 +218,8 @@ class ModelManager:
 
             # Check if models were loaded despite the error
             try:
-                from model_manager import model_manager
-                if model_manager.stats["models_loaded"]:
+                from model_manager import faster_whisper_model_manager
+                if faster_whisper_model_manager.stats["models_loaded"]:
                     logger.info("✅ Models loaded successfully despite error")
                     return True, "Models loaded despite error"
             except Exception:

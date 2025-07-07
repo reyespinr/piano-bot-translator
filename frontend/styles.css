@@ -202,6 +202,88 @@ select:hover {
     margin: 8px 0;
 }
 
+/* === Language and Feature Controls === */
+.language-controls {
+    margin: 12px 0;
+    padding: 8px 0;
+    border-top: 1px solid #4F545C;
+}
+
+.language-controls label {
+    font-size: 11px;
+    color: #B9BBBE;
+    margin-bottom: 4px;
+}
+
+.language-controls select {
+    margin-bottom: 4px;
+}
+
+.feature-controls {
+    margin: 8px 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.feature-controls label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: #B9BBBE;
+    margin: 0;
+    cursor: pointer;
+    text-transform: none;
+}
+
+.feature-controls input[type="checkbox"] {
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    background-color: #40444B;
+    border: 2px solid #7289DA;
+    border-radius: 3px;
+    cursor: pointer;
+    position: relative;
+    transition: all 0.2s;
+}
+
+.feature-controls input[type="checkbox"]:checked {
+    background-color: #7289DA;
+}
+
+.feature-controls input[type="checkbox"]:checked::after {
+    content: '✓';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: white;
+    font-size: 10px;
+    font-weight: bold;
+}
+
+.feature-help {
+    background-color: #4F545C;
+    color: #B9BBBE;
+    border-radius: 50%;
+    width: 16px;
+    height: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    font-weight: bold;
+    cursor: help;
+    flex-shrink: 0;
+}
+
+.feature-help:hover {
+    background-color: #7289DA;
+    color: white;
+}
+
 /* === User Toggle Section === */
 .user-list-container {
     background-color: #36393F;

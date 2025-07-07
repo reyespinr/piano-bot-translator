@@ -16,16 +16,34 @@ logger = get_logger(__name__)
 # Re-export the main functions for backward compatibility
 
 
-async def transcribe(audio_file, current_queue_size=0, concurrent_requests=0, active_transcriptions=0):
+async def transcribe(audio_file, current_queue_size=0, concurrent_requests=0, active_transcriptions=0,
+                     force_language=None, audio_timestamp=None):
     """
     Backward-compatible transcription function that returns only 2 values.
 
     This wrapper maintains API compatibility with the old system while using faster-whisper.
+    Now supports dynamic language selection and temporal alignment.
     """
     transcribed_text, detected_language, result = await transcription_service.transcribe(
-        audio_file, current_queue_size, concurrent_requests, active_transcriptions
+        audio_file, current_queue_size, concurrent_requests, active_transcriptions,
+        force_language, audio_timestamp
     )
     return transcribed_text, detected_language
+
+# Enhanced transcription function that returns full result for temporal alignment
+
+
+async def transcribe_with_timestamp(audio_file, current_queue_size=0, concurrent_requests=0,
+                                    active_transcriptions=0, force_language=None, audio_timestamp=None):
+    """
+    Enhanced transcription function that returns full result with temporal information.
+
+    This is used when temporal alignment is needed for message reordering.
+    """
+    return await transcription_service.transcribe(
+        audio_file, current_queue_size, concurrent_requests, active_transcriptions,
+        force_language, audio_timestamp
+    )
 
 translate = translation.translate
 should_translate = translation.should_translate

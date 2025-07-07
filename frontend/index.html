@@ -48,6 +48,23 @@
                         <button id="listen-btn" class="btn primary" disabled>Listen</button>
                         <button id="clear-btn" class="btn secondary" disabled>Clear</button>
                     </div>
+
+                    <!-- New Language and Ordering Controls -->
+                    <div class="language-controls">
+                        <label for="language-select">Language Override</label>
+                        <select id="language-select">
+                            <option value="">Loading languages...</option>
+                        </select>
+                    </div>
+
+                    <div class="feature-controls">
+                        <label>
+                            <input type="checkbox" id="temporal-ordering-toggle" checked>
+                            Temporal Ordering
+                        </label>
+                        <span class="feature-help"
+                            title="Messages appear in the order they were spoken, not when processing completes">?</span>
+                    </div>
                 </div>
             </div>
 

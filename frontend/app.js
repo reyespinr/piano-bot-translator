@@ -36,13 +36,16 @@ class PianoBotClient {
             transcriptionBox: document.getElementById('transcription-box'),
             translationsContainer: document.getElementById('translations-container'),
             botStatus: document.getElementById('bot-status'),
+            languageSelect: document.getElementById('language-select'),
+            temporalOrderingToggle: document.getElementById('temporal-ordering-toggle'),
             userListContainer: null // Will be created dynamically
         };
 
         // Validate required elements exist
         const requiredElements = ['serverSelect', 'channelSelect', 'joinButton', 'leaveButton', 
                                 'listenButton', 'clearButton', 'connectionStatus', 
-                                'transcriptionBox', 'translationsContainer'];
+                                'transcriptionBox', 'translationsContainer', 'languageSelect',
+                                'temporalOrderingToggle'];
         
         for (const elementName of requiredElements) {
             if (!this.elements[elementName]) {
@@ -77,6 +80,17 @@ class PianoBotClient {
         this.elements.leaveButton.addEventListener('click', () => this.leaveChannel());
         this.elements.listenButton.addEventListener('click', () => this.toggleListening());
         this.elements.clearButton.addEventListener('click', () => this.clearMessages());
+
+        // Language selection
+        this.elements.languageSelect.addEventListener('change', (e) => {
+            const languageCode = e.target.value || null;
+            this.setLanguage(languageCode);
+        });
+
+        // Temporal ordering toggle
+        this.elements.temporalOrderingToggle.addEventListener('change', (e) => {
+            this.toggleTemporalOrdering(e.target.checked);
+        });
 
         // Handle page visibility changes
         document.addEventListener('visibilitychange', () => {
@@ -124,6 +138,10 @@ class PianoBotClient {
             
             // Request initial data
             this.sendCommand('get_guilds');
+            
+            // Load frontend state (languages, settings)
+            this.loadLanguages();
+            this.requestFrontendState();
         };
 
         this.socket.onmessage = (event) => {
@@ -241,6 +259,21 @@ class PianoBotClient {
                 break;
             case 'user_toggle':
                 this.updateUserToggle(message.user_id, message.enabled);
+                break;
+            case 'languages_list':
+                this.updateLanguageDropdown(message.languages, message.current_language);
+                break;
+            case 'language_changed':
+                console.log('🌍 Language changed to:', message.language_name);
+                // Update the dropdown to reflect the change
+                this.elements.languageSelect.value = message.language_code || '';
+                break;
+            case 'temporal_ordering_changed':
+                console.log('⏰ Temporal ordering changed to:', message.enabled);
+                this.elements.temporalOrderingToggle.checked = message.enabled;
+                break;
+            case 'frontend_state':
+                this.updateFrontendState(message);
                 break;
             default:
                 console.warn('Unknown message type:', message.type);
@@ -660,6 +693,76 @@ class PianoBotClient {
         while (messages.length > 100) {
             container.removeChild(messages[0]);
         }
+    }
+
+    // === Language Selection Methods ===
+    setLanguage(languageCode) {
+        if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+            this.socket.send(JSON.stringify({
+                command: 'set_language',
+                language_code: languageCode
+            }));
+            console.log('Language override set to:', languageCode || 'Auto-detect');
+        } else {
+            console.warn('Cannot set language: WebSocket not connected');
+        }
+    }
+
+    loadLanguages() {
+        if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+            this.socket.send(JSON.stringify({
+                command: 'get_languages'
+            }));
+        }
+    }
+
+    updateLanguageDropdown(languages, currentLanguage) {
+        const select = this.elements.languageSelect;
+        select.innerHTML = '';
+
+        languages.forEach(lang => {
+            const option = document.createElement('option');
+            option.value = lang.code || '';
+            option.textContent = `${lang.flag || '🌍'} ${lang.name}`;
+            if (lang.code === currentLanguage) {
+                option.selected = true;
+            }
+            select.appendChild(option);
+        });
+    }
+
+    // === Temporal Ordering Methods ===
+    toggleTemporalOrdering(enabled) {
+        if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+            this.socket.send(JSON.stringify({
+                command: 'toggle_temporal_ordering',
+                enabled: enabled
+            }));
+            console.log('Temporal ordering:', enabled ? 'enabled' : 'disabled');
+        } else {
+            console.warn('Cannot toggle temporal ordering: WebSocket not connected');
+        }
+    }
+
+    // === Frontend State Management ===
+    requestFrontendState() {
+        if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+            this.socket.send(JSON.stringify({
+                command: 'get_frontend_state'
+            }));
+        }
+    }
+
+    updateFrontendState(state) {
+        // Update language dropdown
+        if (state.supported_languages) {
+            this.updateLanguageDropdown(state.supported_languages, state.language_override);
+        }
+        
+        // Update temporal ordering toggle
+        this.elements.temporalOrderingToggle.checked = state.temporal_ordering_enabled;
+        
+        console.log('🔧 Frontend state updated:', state);
     }
 }
 

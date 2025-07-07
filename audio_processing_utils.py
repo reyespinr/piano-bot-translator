@@ -180,6 +180,19 @@ async def force_delete_file(file_path: str) -> bool:
     return False
 
 
+def safe_remove_file(file_path: str) -> bool:
+    """Safely remove a file with error handling."""
+    try:
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
+            logger.debug("Removed file: %s", os.path.basename(file_path))
+            return True
+        return False
+    except (OSError, PermissionError) as e:
+        logger.warning("Failed to remove file %s: %s", file_path, str(e))
+        return False
+
+
 def check_cuda_health():
     """Check CUDA availability and health."""
     try:

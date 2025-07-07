@@ -20,7 +20,7 @@ from discord.ext import commands
 from fastapi import FastAPI, WebSocket
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from model_manager import model_manager
+from faster_whisper_manager import faster_whisper_model_manager
 from bot_manager import DiscordBotManager
 from websocket_handler import WebSocketManager
 from translation_service import VoiceTranslator
@@ -163,9 +163,9 @@ async def lifespan(_app: FastAPI):
         global bot
         bot = instances.bot_manager.create_bot(translation_callback)
 
-        # Initialize models using the unified ModelManager
+        # Initialize models using the faster-whisper ModelManager
         logger.info("Initializing transcription models...")
-        success = await model_manager.initialize_models(warm_up=False)
+        success = await faster_whisper_model_manager.initialize_models(warm_up=False)
         if success:
             logger.info("✅ Models initialized successfully")
         else:
@@ -177,7 +177,7 @@ async def lifespan(_app: FastAPI):
         async def warmup_task():
             try:
                 logger.info("🔥 Starting background model warm-up...")
-                success = await model_manager.warm_up_models()
+                success = await faster_whisper_model_manager.warm_up_models()
                 if success:
                     logger.info("🎯 Model warm-up completed successfully!")
                 else:
@@ -246,10 +246,8 @@ async def lifespan(_app: FastAPI):
             logger.info("🛑 Stopping Discord bot...")
             await instances.bot_manager.stop_bot()
 
-        # Shutdown model manager
-        if hasattr(model_manager, 'cleanup'):
-            logger.info("🛑 Cleaning up models...")
-            await model_manager.cleanup()
+        # Shutdown model manager (faster-whisper doesn't need explicit cleanup)
+        logger.info("🛑 Models will be cleaned up automatically")
 
         logger.info("✅ Server shutdown completed")
     except Exception as e:

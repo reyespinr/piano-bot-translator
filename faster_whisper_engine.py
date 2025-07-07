@@ -1,8 +1,8 @@
 """
-Core transcription engine with modular, testable components.
+Faster-Whisper Transcription Engine.
 
-This module contains the refactored transcription logic, broken down into
-smaller, focused functions for better maintainability and testing.
+This module provides the faster-whisper implementation of transcription,
+designed as a drop-in replacement for the stable-ts transcription engine.
 """
 import asyncio
 import gc
@@ -14,6 +14,7 @@ import uuid
 from typing import Tuple, Optional, Any
 from dataclasses import dataclass
 import torch
+from faster_whisper import WhisperModel
 from audio_processing_utils import COMMON_HALLUCINATIONS, is_recoverable_error, check_cuda_health, clear_cuda_cache
 from faster_whisper_manager import faster_whisper_model_manager
 from logging_config import get_logger
@@ -22,13 +23,14 @@ logger = get_logger(__name__)
 
 
 @dataclass
-class TranscriptionRequest:
-    """Encapsulates transcription request parameters."""
+class FasterWhisperTranscriptionRequest:
+    """Encapsulates faster-whisper transcription request parameters."""
     audio_file: str
-    model: Any
+    model: WhisperModel
     model_name: str
     model_index: Optional[int] = None
     transcription_id: str = None
+    force_language: Optional[str] = None  # NEW: Language override capability
 
     def __post_init__(self):
         if self.transcription_id is None:
@@ -36,18 +38,19 @@ class TranscriptionRequest:
 
 
 @dataclass
-class TranscriptionResult:
-    """Encapsulates transcription results."""
+class FasterWhisperTranscriptionResult:
+    """Encapsulates faster-whisper transcription results."""
     text: str
     language: str
     confidence_score: float
-    raw_result: Any = None
+    segments: Any = None
+    info: Any = None
     success: bool = True
     error_message: str = None
 
 
-class ModelLockManager:
-    """Manages model locks and display names."""
+class FasterWhisperModelLockManager:
+    """Manages faster-whisper model locks and display names."""
 
     @staticmethod
     def get_model_lock_and_name(model_name: str, model_index: Optional[int], transcription_id: str) -> Tuple[threading.RLock, str]:
@@ -72,15 +75,15 @@ class ModelLockManager:
         return model_lock, model_display_name
 
 
-class TranscriptionEngine:
-    """Core transcription engine with retry logic."""
+class FasterWhisperTranscriptionEngine:
+    """Core faster-whisper transcription engine with retry logic."""
 
     def __init__(self, max_retries: int = 2):
         self.max_retries = max_retries
 
-    def execute_transcription(self, request: TranscriptionRequest, model_lock: threading.RLock,
-                              model_display_name: str) -> Optional[Any]:
-        """Execute transcription with retry logic."""
+    def execute_transcription(self, request: FasterWhisperTranscriptionRequest, model_lock: threading.RLock,
+                              model_display_name: str) -> Optional[Tuple[Any, Any]]:
+        """Execute faster-whisper transcription with retry logic."""
         retry_count = 0
 
         while retry_count <= self.max_retries:
@@ -109,9 +112,9 @@ class TranscriptionEngine:
 
         return None
 
-    def _attempt_transcription(self, request: TranscriptionRequest, model_lock: threading.RLock,
-                               model_display_name: str, retry_count: int) -> Any:
-        """Single transcription attempt."""
+    def _attempt_transcription(self, request: FasterWhisperTranscriptionRequest, model_lock: threading.RLock,
+                               model_display_name: str, retry_count: int) -> Tuple[Any, Any]:
+        """Single faster-whisper transcription attempt."""
         lock_acquired = False
 
         try:
@@ -122,23 +125,34 @@ class TranscriptionEngine:
             logger.debug("🔓 [%s] Lock acquired for %s model",
                          request.transcription_id, model_display_name)
 
-            logger.debug("🎤 [%s] Starting %s model transcription with enhanced settings (attempt %d)",
+            logger.debug("🎤 [%s] Starting %s model transcription with faster-whisper (attempt %d)",
                          request.transcription_id, model_display_name, retry_count + 1)
-            # Execute transcription with enhanced settings
-            result = request.model.transcribe(
+
+            # Prepare transcription parameters
+            transcribe_params = {
+                "beam_size": 5,
+                "best_of": 5,
+                "temperature": 0.0,
+                "condition_on_previous_text": False,
+                "vad_filter": True,
+                "vad_parameters": dict(min_silence_duration_ms=500)
+            }
+
+            # Add language parameter if forced
+            if request.force_language:
+                transcribe_params["language"] = request.force_language
+                logger.debug("🌐 [%s] Forcing language: %s",
+                             request.transcription_id, request.force_language)
+
+            # Execute faster-whisper transcription
+            segments, info = request.model.transcribe(
                 request.audio_file,
-                vad=True,                  # Enable Voice Activity Detection
-                vad_threshold=0.35,        # VAD confidence threshold
-                no_speech_threshold=0.6,   # Filter non-speech sections
-                max_instant_words=0.3,     # Reduce hallucination words
-                suppress_silence=True,     # Use silence detection for better timestamps
-                only_voice_freq=True,      # Focus on human voice frequency range
-                word_timestamps=True       # Important for proper segmentation
+                **transcribe_params
             )
 
             logger.debug("✅ [%s] %s model transcription completed successfully",
                          request.transcription_id, model_display_name)
-            return result
+            return segments, info
 
         finally:
             if lock_acquired:
@@ -154,7 +168,7 @@ class TranscriptionEngine:
         """Determine if error is recoverable and retry should be attempted."""
         return retry_count < self.max_retries and is_recoverable_error(error_str)
 
-    def _handle_retry(self, request: TranscriptionRequest, model_lock: threading.RLock,
+    def _handle_retry(self, request: FasterWhisperTranscriptionRequest, model_lock: threading.RLock,
                       model_display_name: str, retry_count: int, error_str: str):
         """Handle retry logic including model state reset and backoff."""
         logger.warning("🔄 [%s] Recoverable error detected, retrying transcription (attempt %d/%d): %s",
@@ -172,12 +186,10 @@ class TranscriptionEngine:
         # Exponential backoff
         time.sleep(0.5 * retry_count)
 
-    def _reset_model_state(self, model):
-        """Reset model internal state to recover from corrupted state."""
+    def _reset_model_state(self, model: WhisperModel):
+        """Reset faster-whisper model internal state to recover from corrupted state."""
         try:
-            if hasattr(model, 'model') and hasattr(model.model, 'decoder'):
-                model.model.decoder.reset_cache()
-
+            # Faster-whisper uses CTranslate2, different cleanup approach
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
@@ -185,7 +197,8 @@ class TranscriptionEngine:
             gc.collect()
 
         except Exception as e:
-            logger.warning("Failed to reset model state: %s", str(e))
+            logger.warning(
+                "Failed to reset faster-whisper model state: %s", str(e))
 
     def _attempt_cuda_recovery(self):
         """Attempt to recover from CUDA errors by clearing cache and checking health."""
@@ -208,153 +221,70 @@ class TranscriptionEngine:
             logger.error("❌ CUDA recovery attempt failed: %s", str(e))
 
 
-class ResultProcessor:
-    """Processes and validates transcription results."""
+class FasterWhisperResultProcessor:
+    """Processes and validates faster-whisper transcription results."""
 
     @staticmethod
-    def extract_result_data(raw_result: Any, transcription_id: str) -> Tuple[str, str]:
-        """Extract text and language from raw transcription result."""
+    def extract_result_data(segments: Any, info: Any, transcription_id: str) -> Tuple[str, str]:
+        """Extract text and language from faster-whisper results."""
         try:
-            if hasattr(raw_result, 'text'):
-                transcribed_text = getattr(raw_result, 'text', '').strip()
-                detected_language = getattr(raw_result, 'language', 'unknown')
-            elif isinstance(raw_result, dict):
-                transcribed_text = raw_result.get('text', '').strip()
-                detected_language = raw_result.get('language', 'unknown')
-            else:
-                logger.warning("⚠️ [%s] Unknown result type: %s",
-                               transcription_id, type(raw_result))
-                transcribed_text = str(
-                    raw_result).strip() if raw_result else ''
-                detected_language = 'unknown'
+            # Convert segments generator to list and extract text
+            segment_list = list(segments)
+            text = " ".join([segment.text for segment in segment_list]).strip()
 
-            return transcribed_text, detected_language
+            # Get detected language from info
+            detected_language = info.language
 
-        except Exception as result_error:
-            logger.error("❌ [%s] Error extracting result data: %s",
-                         transcription_id, str(result_error))
-            raise
+            logger.debug("🎯 [%s] Extracted: text='%s' (length: %d), language='%s'",
+                         transcription_id, text[:50] if text else "None",
+                         len(text), detected_language)
 
-    @staticmethod
-    async def handle_icelandic_detection(raw_result: Any, transcribed_text: str, detected_language: str,
-                                         request: TranscriptionRequest, model_lock: threading.RLock) -> Tuple[str, str, Any]:
-        """Handle Austrian German misidentified as Icelandic."""
-        if detected_language == "is":  # "is" is the language code for Icelandic
-            logger.info("🇦🇹 [%s] Detected Icelandic - likely Austrian German. Re-transcribing as German...",
-                        request.transcription_id)
-
-            # Re-transcribe with German as forced language
-            def retranscribe_task():
-                try:
-                    model_lock.acquire()
-                    return request.model.transcribe(
-                        request.audio_file,
-                        vad=True,
-                        vad_threshold=0.35,
-                        no_speech_threshold=0.6,
-                        max_instant_words=0.3,
-                        suppress_silence=True,
-                        only_voice_freq=True,
-                        word_timestamps=True,
-                        language="de"  # Force German language
-                    )
-                finally:
-                    model_lock.release()
-
-            loop = asyncio.get_event_loop()
-            retry_result = await loop.run_in_executor(None, retranscribe_task)
-
-            if retry_result:
-                if hasattr(retry_result, 'text'):
-                    transcribed_text = getattr(
-                        retry_result, 'text', '').strip()
-                elif isinstance(retry_result, dict):
-                    transcribed_text = retry_result.get('text', '').strip()
-
-                detected_language = "de"  # Override detected language to German
-                raw_result = retry_result  # Use the re-transcribed result for confidence analysis
-                logger.info("🇩🇪 [%s] Re-transcribed as German: %s",
-                            request.transcription_id, transcribed_text[:50])
-
-        return transcribed_text, detected_language, raw_result
-
-
-class ConfidenceFilter:
-    """Handles confidence filtering and validation."""
-
-    @staticmethod
-    def apply_confidence_filtering(result: Any, transcribed_text: str, transcription_id: str) -> Tuple[bool, float]:
-        """Apply confidence filtering to transcription results."""
-        try:
-            # Get confidence values from segments
-            confidences = []
-            if hasattr(result, "segments") and result.segments:
-                for segment in result.segments:
-                    if hasattr(segment, "avg_logprob"):
-                        confidences.append(segment.avg_logprob)
-
-            if confidences:
-                avg_log_prob = sum(confidences) / len(confidences)
-
-                # General confidence threshold
-                confidence_threshold = -1.5
-                if avg_log_prob < confidence_threshold:
-                    logger.info("❌ [%s] Low confidence transcription rejected (%.2f): '%s'",
-                                transcription_id, avg_log_prob, transcribed_text)
-                    return False, avg_log_prob
-
-                # Special case for common hallucinations
-                text = transcribed_text.strip().lower()
-                text_clean = text.translate(
-                    str.maketrans('', '', string.punctuation))
-
-                if len(text_clean) < 15 and text_clean in COMMON_HALLUCINATIONS:
-                    # For these common short responses, require higher confidence
-                    stricter_threshold = -0.5
-                    if avg_log_prob < stricter_threshold:
-                        logger.info("❌ [%s] Short hallucination '%s' rejected with confidence %.2f",
-                                    transcription_id, text_clean, avg_log_prob)
-                        return False, avg_log_prob
-
-                logger.info("✅ [%s] Transcription confidence: %.2f, passed filtering",
-                            transcription_id, avg_log_prob)
-                return True, avg_log_prob
-            else:
-                # No confidence data available - basic text quality filtering
-                logger.warning("[%s] No confidence data available from segments - result type: %s",
-                               transcription_id, type(result).__name__)
-
-                # Try to get confidence from result object directly as fallback
-                if hasattr(result, 'avg_logprob'):
-                    confidence = getattr(result, 'avg_logprob', 0.0)
-                    logger.info(
-                        "📊 [%s] Using result-level confidence: %.2f", transcription_id, confidence)
-                    return confidence >= -1.5, confidence
-
-                # Basic text quality filtering as last resort
-                if not transcribed_text or len(transcribed_text.strip()) < 2:
-                    return False, 0.0
-
-                # Check for obvious hallucinations without confidence
-                text_clean = transcribed_text.strip().lower().translate(
-                    str.maketrans('', '', string.punctuation))
-
-                if len(text_clean) < 10 and text_clean in COMMON_HALLUCINATIONS:
-                    logger.info("❌ [%s] Short hallucination '%s' filtered without confidence data",
-                                transcription_id, text_clean)
-                    return False, 0.0
-
-                logger.warning(
-                    "[%s] No confidence data - accepting by default", transcription_id)
-                return True, 0.0  # Default to accepting if no confidence data
+            return text, detected_language
 
         except Exception as e:
-            logger.error("Error in confidence filtering: %s", str(e))
-            return True, 0.0  # Default to accepting on error
+            logger.error("❌ [%s] Error extracting faster-whisper result data: %s",
+                         transcription_id, str(e))
+            return "", "error"
+
+    @staticmethod
+    def apply_confidence_filtering(info: Any, transcribed_text: str, transcription_id: str) -> Tuple[bool, float]:
+        """Apply confidence filtering to faster-whisper results."""
+        try:
+            # Faster-whisper provides language probability in info
+            confidence_score = getattr(info, 'language_probability', 0.9)
+
+            # Basic confidence threshold
+            min_confidence = 0.3
+
+            # Length-based filtering
+            if len(transcribed_text.strip()) < 2:
+                logger.debug("🔇 [%s] Text too short: '%s'",
+                             transcription_id, transcribed_text)
+                return False, confidence_score
+
+            # Hallucination filtering
+            text_lower = transcribed_text.lower().strip()
+            if text_lower in COMMON_HALLUCINATIONS:
+                logger.debug("🔇 [%s] Common hallucination detected: '%s'",
+                             transcription_id, transcribed_text)
+                return False, confidence_score
+
+            # Confidence threshold
+            if confidence_score < min_confidence:
+                logger.debug("🔇 [%s] Low confidence: %.3f < %.3f",
+                             transcription_id, confidence_score, min_confidence)
+                return False, confidence_score
+
+            return True, confidence_score
+
+        except Exception as e:
+            logger.warning(
+                "⚠️ [%s] Error in confidence filtering: %s", transcription_id, str(e))
+            return True, 0.5  # Default to accepting with medium confidence
 
 
-class ModelCleanupManager:
-    """Handles model cleanup and resource management."""
+class FasterWhisperModelCleanupManager:
+    """Handles faster-whisper model cleanup and resource management."""
 
     @staticmethod
     def perform_cleanup(model_name: str, model_index: Optional[int], transcription_id: str, model_display_name: str):
@@ -386,29 +316,31 @@ class ModelCleanupManager:
                          transcription_id, model_display_name, str(cleanup_error))
 
 
-async def transcribe_with_model_refactored(audio_file: str, model: Any, model_name: str,
-                                           model_index: Optional[int] = None) -> Tuple[Optional[str], Optional[str], Optional[Any]]:
+async def faster_whisper_transcribe_with_model(audio_file: str, model: WhisperModel, model_name: str,
+                                               model_index: Optional[int] = None,
+                                               force_language: Optional[str] = None) -> Tuple[Optional[str], Optional[str], Optional[Any]]:
     """
-    Refactored transcription function with modular components.
+    Faster-whisper transcription function with modular components.
 
-    This is the new, clean implementation that replaces the massive original function.
+    This is the faster-whisper implementation that replaces the stable-ts version.
     """
     # Create transcription request
-    request = TranscriptionRequest(audio_file, model, model_name, model_index)
+    request = FasterWhisperTranscriptionRequest(
+        audio_file, model, model_name, model_index, force_language=force_language)
 
-    logger.debug("🔄 [%s] Processing with %s model...",
+    logger.debug("🔄 [%s] Processing with faster-whisper %s model...",
                  request.transcription_id, f"{model_name.upper()}-{model_index + 1}" if model_index is not None else model_name.upper())
 
     try:
         # Get model lock and display name
-        model_lock, model_display_name = ModelLockManager.get_model_lock_and_name(
+        model_lock, model_display_name = FasterWhisperModelLockManager.get_model_lock_and_name(
             model_name, model_index, request.transcription_id)
 
         # Execute transcription with retry logic
         logger.debug("🚀 [%s] Submitting %s model task to thread pool",
                      request.transcription_id, model_display_name)
 
-        transcription_engine = TranscriptionEngine()
+        transcription_engine = FasterWhisperTranscriptionEngine()
 
         def transcribe_task():
             return transcription_engine.execute_transcription(request, model_lock, model_display_name)
@@ -425,27 +357,26 @@ async def transcribe_with_model_refactored(audio_file: str, model: Any, model_na
                          request.transcription_id, model_display_name)
             return None, None, None
 
+        segments, info = result
+
         # Extract text and language from result
-        transcribed_text, detected_language = ResultProcessor.extract_result_data(
-            result, request.transcription_id)
-        # Handle Austrian German misidentified as Icelandic
-        transcribed_text, detected_language, result = await ResultProcessor.handle_icelandic_detection(
-            result, transcribed_text, detected_language, request, model_lock)
+        transcribed_text, detected_language = FasterWhisperResultProcessor.extract_result_data(
+            segments, info, request.transcription_id)
 
         # Apply confidence filtering
-        confidence_passed, confidence_score = ConfidenceFilter.apply_confidence_filtering(
-            result, transcribed_text, request.transcription_id)
+        confidence_passed, confidence_score = FasterWhisperResultProcessor.apply_confidence_filtering(
+            info, transcribed_text, request.transcription_id)
 
         if not confidence_passed:
             logger.debug("🔇 [%s] Transcription filtered out due to low confidence: %.2f",
                          request.transcription_id, confidence_score)
-            return "", detected_language, result
+            return "", detected_language, info
 
         logger.info("✅ [%s] %s model completed: text='%s' (length: %d), language='%s', confidence=%.2f",
                     request.transcription_id, model_display_name, transcribed_text,
                     len(transcribed_text), detected_language, confidence_score)
 
-        return transcribed_text, detected_language, result
+        return transcribed_text, detected_language, info
 
     except Exception as e:
         logger.error("❌ [%s] Unexpected error in %s model processing: %s",
@@ -457,5 +388,5 @@ async def transcribe_with_model_refactored(audio_file: str, model: Any, model_na
     finally:
         # Always perform cleanup operations
         if 'model_display_name' in locals():
-            ModelCleanupManager.perform_cleanup(
+            FasterWhisperModelCleanupManager.perform_cleanup(
                 model_name, model_index, request.transcription_id, model_display_name)

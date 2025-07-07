@@ -20,7 +20,7 @@ from discord.ext import commands
 from fastapi import FastAPI, WebSocket
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from faster_whisper_manager import faster_whisper_model_manager
+from model_manager import faster_whisper_model_manager
 from bot_manager import DiscordBotManager
 from websocket_handler import WebSocketManager
 from translation_service import VoiceTranslator

@@ -194,7 +194,7 @@ class ModelManager:
         """Load and validate models."""
         try:
             logger.info("Loading translation models...")
-            from faster_whisper_manager import faster_whisper_model_manager
+            from model_manager import faster_whisper_model_manager
 
             # Check if models are already loaded
             if faster_whisper_model_manager.stats["models_loaded"]:
@@ -218,7 +218,7 @@ class ModelManager:
 
             # Check if models were loaded despite the error
             try:
-                from faster_whisper_manager import faster_whisper_model_manager
+                from model_manager import faster_whisper_model_manager
                 if faster_whisper_model_manager.stats["models_loaded"]:
                     logger.info("✅ Models loaded successfully despite error")
                     return True, "Models loaded despite error"

@@ -8,7 +8,7 @@ replacement for the stable-ts model manager.
 import threading
 from typing import Dict, List, Tuple, Any, Optional
 from config_manager import get_config
-from faster_whisper_core import (
+from model_core import (
     FasterWhisperModelTier,
     FasterWhisperModelLoader,
     FasterWhisperModelWarmup,

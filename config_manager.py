@@ -42,10 +42,20 @@ class LoggingConfig:
 
 
 @dataclass
+class TranslationConfig:
+    """Translation configuration."""
+    deepl_api_key: str = ""
+    deepl_api_url: str = "https://api-free.deepl.com/v2/translate"
+    target_language: str = "EN"
+    timeout: int = 10
+
+
+@dataclass
 class AppConfig:
     """Complete application configuration."""
     models: ModelsConfig
     logging: LoggingConfig
+    translation: TranslationConfig
 
 
 class ConfigManager:
@@ -126,7 +136,17 @@ class ConfigManager:
             backup_count=logging_raw.get('backup_count', 4)
         )
 
-        return AppConfig(models=models_config, logging=logging_config)
+        # Parse translation config
+        translation_raw = raw_config.get('translation', {})
+        translation_config = TranslationConfig(
+            deepl_api_key=translation_raw.get('deepl_api_key', ''),
+            deepl_api_url=translation_raw.get(
+                'deepl_api_url', 'https://api-free.deepl.com/v2/translate'),
+            target_language=translation_raw.get('target_language', 'EN'),
+            timeout=translation_raw.get('timeout', 10)
+        )
+
+        return AppConfig(models=models_config, logging=logging_config, translation=translation_config)
 
     def _get_default_config(self) -> AppConfig:
         """Get default configuration when YAML loading fails."""
@@ -147,8 +167,9 @@ class ConfigManager:
         models_config = ModelsConfig(
             accurate=accurate_config, fast=fast_config)
         logging_config = LoggingConfig()
+        translation_config = TranslationConfig()
 
-        return AppConfig(models=models_config, logging=logging_config)
+        return AppConfig(models=models_config, logging=logging_config, translation=translation_config)
 
     @property
     def config(self) -> AppConfig:

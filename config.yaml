@@ -20,7 +20,7 @@ models:
   accurate:
     name: "large-v3-turbo"
     # name: "base"
-    count: 1
+    count: 3
     description: "High-accuracy transcription"
     device: "cuda"
     warmup_timeout: 30
@@ -28,7 +28,7 @@ models:
   # Fast tier - small, fast models for speed and parallelization  
   fast:
     name: "base"
-    count: 3
+    count: 1
     description: "Fast parallel transcription"
     device: "cuda"
     warmup_timeout: 30

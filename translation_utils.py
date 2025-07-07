@@ -30,13 +30,12 @@ async def translate(text):
         str: The translated text in English
     """
     config = get_config()
-    translation_config = config.get('translation', {})
+    translation_config = config.translation
 
-    api_key = translation_config.get('deepl_api_key')
-    api_url = translation_config.get(
-        'deepl_api_url', 'https://api-free.deepl.com/v2/translate')
-    target_lang = translation_config.get('target_language', 'EN')
-    timeout = translation_config.get('timeout', 10)
+    api_key = translation_config.deepl_api_key
+    api_url = translation_config.deepl_api_url
+    target_lang = translation_config.target_language
+    timeout = translation_config.timeout
 
     if not api_key:
         logger.error("DeepL API key not configured in config.yaml")

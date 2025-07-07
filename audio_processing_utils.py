@@ -28,7 +28,7 @@ CLEANUP_DELAY = 0.5
 #     "got it", "makes sense", "sounds good", "sounds great", "sounds cool"
 # }
 COMMON_HALLUCINATIONS = {
-    "thank you", "thanks", "thank", "um", "hmm"
+    "thank you", "thanks", "thank", "um", "hmm", "I'm sorry", "sorry"
 }
 
 

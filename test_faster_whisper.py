@@ -73,7 +73,7 @@ async def test_faster_whisper():
 
 
 async def benchmark_comparison():
-    """Benchmark faster-whisper vs stable-ts (if available)."""
+    """Benchmark faster-whisper performance."""
     print("\n🏁 Running Performance Benchmark...")
 
     try:

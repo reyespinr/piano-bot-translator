@@ -46,7 +46,7 @@ pip install -r requirements.txt
 
 **What gets installed:**
 - `py-cord` + `PyNaCl` - Modern Discord voice channel integration
-- `stable-ts` + `openai-whisper` - Enhanced Whisper transcription (pinned versions for stability)
+- `faster-whisper` - GPU-accelerated Whisper transcription with CUDA support
 - `torch` + `torchaudio` - PyTorch ML framework with CUDA support
 - `numpy<2.0` - Numerical computing (version locked for compatibility)
 - `fastapi` + `uvicorn` - Modern async web server and WebSocket handling
@@ -59,8 +59,9 @@ The optimized requirements.txt includes specific versions and CUDA support for b
 **Recommended installation:**
 ```bash
 # For a clean installation, especially if you've had Whisper issues:
-pip uninstall openai-whisper stable-ts -y
+pip uninstall openai-whisper -y
 pip install -r requirements.txt
+pip install -r requirements-faster-whisper.txt
 ```
 
 ### 3. System Dependencies
@@ -245,13 +246,14 @@ logging:
 ### Common Issues
 
 **"cannot import name 'dtw_kernel' from 'whisper.triton_ops'"**
-- This is a known compatibility issue between Whisper and Triton operations
-- Solution: Reinstall with pinned versions:
+- This was a compatibility issue with the old stable-ts implementation
+- Solution: The project now uses faster-whisper which doesn't have this issue:
 ```bash
-pip uninstall openai-whisper stable-ts -y
+pip uninstall openai-whisper -y
 pip install -r requirements.txt
+pip install -r requirements-faster-whisper.txt
 ```
-- If the issue persists, try CPU-only mode by setting `device: "cpu"` in `config.yaml`
+- If issues persist, ensure CUDA is properly installed for GPU acceleration
 
 **"FFmpeg not found"**
 - Install FFmpeg and ensure it's in your system PATH
@@ -305,8 +307,10 @@ pip install -r requirements.txt
 ├── audio_session_manager.py       # Audio session handling
 ├── audio_worker_manager.py        # Audio worker management
 ├── bot_manager.py                 # Discord bot lifecycle management
-├── model_manager.py               # ML model management and loading
-├── model_core.py                  # Core model management components
+├── faster_whisper_manager.py      # Faster-Whisper model management
+├── faster_whisper_core.py         # Core faster-whisper components
+├── faster_whisper_engine.py       # Faster-Whisper transcription engine
+├── faster_whisper_service.py      # Faster-Whisper transcription service
 ├── websocket_handler.py           # WebSocket connection management
 ├── websocket_broadcaster.py       # WebSocket message broadcasting
 ├── websocket_connection_manager.py # WebSocket connection handling
@@ -371,7 +375,7 @@ This project is open source. Please respect Discord's Terms of Service and API g
 ## Acknowledgments
 
 - [OpenAI Whisper](https://github.com/openai/whisper) for speech recognition
-- [stable-ts](https://github.com/jianfch/stable-ts) for enhanced Whisper processing
+- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) for GPU-accelerated Whisper processing
 - [DeepL](https://www.deepl.com/api) for translation services
 - [py-cord](https://github.com/Pycord-Development/pycord) for modern Discord integration
 - [FastAPI](https://fastapi.tiangolo.com/) for web framework

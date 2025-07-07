@@ -6,90 +6,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Piano Bot Translator - Spectator View</title>
     <link rel="stylesheet" href="styles.css">
-    <style>
-        .spectator-header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 1rem;
-            text-align: center;
-            margin-bottom: 2rem;
-        }
-
-        .spectator-status {
-            background: #f8f9fa;
-            border-left: 4px solid #6c757d;
-            padding: 1rem;
-            margin-bottom: 1rem;
-        }
-
-        .spectator-note {
-            background: #e3f2fd;
-            border: 1px solid #2196f3;
-            border-radius: 4px;
-            padding: 0.75rem;
-            margin-bottom: 1rem;
-            font-size: 0.9rem;
-            color: #1976d2;
-        }
-
-        .connection-indicator {
-            display: inline-block;
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            margin-right: 8px;
-            background-color: #dc3545;
-        }
-
-        .connection-indicator.connected {
-            background-color: #28a745;
-        }
-
-        .readonly-badge {
-            background: #6c757d;
-            color: white;
-            padding: 0.25rem 0.5rem;
-            border-radius: 12px;
-            font-size: 0.75rem;
-            font-weight: bold;
-        }
-
-        /* Use the same content layout as admin UI */
-        .content {
-            display: flex;
-            gap: 20px;
-            max-width: 1400px;
-            margin: 0 auto;
-        }
-
-        .transcription-container,
-        .translation-container {
-            flex: 1;
-        }
-
-        /* Responsive design for mobile */
-        @media (max-width: 768px) {
-            .content {
-                flex-direction: column;
-                gap: 10px;
-            }
-        }
-    </style>
 </head>
 
 <body>
     <div class="container">
-        <div class="spectator-header">
-            <h1>🎹 Piano Bot Translator</h1>
-            <h2>Spectator View <span class="readonly-badge">READ-ONLY</span></h2>
-            <div class="connection-status">
-                <span class="connection-indicator" id="connectionIndicator"></span>
-                <span id="connectionStatus">Connecting...</span>
-            </div>
+        <!-- Full-width header with margins -->
+        <div class="header-section">
+            <h1>Piano Bot Translator</h1>
         </div>
-        <div class="spectator-note">
-            <strong>Spectator Mode:</strong> You can view live translations but cannot control the bot.
-            For full control, use the <a href="/">admin interface</a>.
+
+        <!-- Status bar -->
+        <div class="status-bar">
+            <div>
+                <span>Bot Status: </span>
+                <span id="bot-status" class="status-offline">Offline</span>
+            </div>
+            <div id="connection-status" class="connection-offline">Not connected to any channel</div>
         </div>
 
         <div class="content">
@@ -108,8 +40,8 @@
         class SpectatorApp {
             constructor() {
                 this.websocket = null;
-                this.connectionStatus = document.getElementById('connectionStatus');
-                this.connectionIndicator = document.getElementById('connectionIndicator');
+                this.botStatus = document.getElementById('bot-status');
+                this.connectionStatus = document.getElementById('connection-status');
                 this.transcriptionBox = document.getElementById('transcription-box');
                 this.translationsContainer = document.getElementById('translations-container');
 
@@ -123,6 +55,7 @@
                 const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
                 const wsUrl = `${protocol}//${window.location.host}/ws/spectator`;
 
+                this.updateBotStatus(false);
                 this.updateConnectionStatus('Connecting...', false);
 
                 try {
@@ -130,6 +63,7 @@
                     this.setupWebSocketHandlers();
                 } catch (error) {
                     console.error('WebSocket connection error:', error);
+                    this.updateBotStatus(false);
                     this.updateConnectionStatus('Connection failed', false);
                 }
             }
@@ -137,7 +71,12 @@
             setupWebSocketHandlers() {
                 this.websocket.onopen = () => {
                     console.log('Connected to spectator WebSocket');
-                    this.updateConnectionStatus('Connected', true);
+                    this.updateBotStatus(true);
+
+                    // Request current status when connected
+                    this.sendMessage({
+                        type: 'get_status'
+                    });
                 };
 
                 this.websocket.onmessage = (event) => {
@@ -151,12 +90,13 @@
 
                 this.websocket.onerror = (error) => {
                     console.error('WebSocket error:', error);
-                    this.updateConnectionStatus('Connection error', false);
+                    this.updateBotStatus(false);
                 };
 
                 this.websocket.onclose = (event) => {
                     console.log('WebSocket connection closed:', event.code, event.reason);
-                    this.updateConnectionStatus('Disconnected', false);
+                    this.updateBotStatus(false);
+                    this.updateConnectionStatus('Not connected to any channel', false);
 
                     // Attempt to reconnect after 3 seconds
                     setTimeout(() => {
@@ -165,7 +105,17 @@
                         }
                     }, 3000);
                 };
-            } handleMessage(data) {
+            }
+
+            sendMessage(message) {
+                if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+                    this.websocket.send(JSON.stringify(message));
+                } else {
+                    console.warn('WebSocket not connected, cannot send message:', message);
+                }
+            }
+
+            handleMessage(data) {
                 console.log('Received message:', data);
 
                 switch (data.type) {
@@ -181,16 +131,85 @@
                     case 'listen_status':
                         this.updateListeningStatus(data.is_listening);
                         break;
+                    case 'status':
+                        this.handleStatusMessage(data);
+                        break;
+                    case 'spectator_status':
+                        this.handleSpectatorStatus(data);
+                        break;
+                    case 'connection_status':
+                        this.handleConnectionStatusUpdate(data);
+                        break;
+                    case 'voice_connection_status':
+                        this.updateVoiceConnectionStatus(data);
+                        break;
                     default:
                         console.log('Unknown message type:', data.type);
                 }
-            } updateConnectionStatus(status, connected) {
+            }
+
+            handleConnectionStatusUpdate(message) {
+                console.log('Received connection status update:', message);
+                // The message contains the connection status text
+                if (message.status) {
+                    // Check if it's a "Connected to" message or disconnection
+                    if (message.status.startsWith('Connected to')) {
+                        this.updateConnectionStatus(message.status, true);
+                    } else {
+                        this.updateConnectionStatus(message.status, false);
+                    }
+                }
+            }
+
+            handleSpectatorStatus(message) {
+                console.log('Received spectator status:', message);
+                if (message.connected_channel) {
+                    this.updateConnectionStatus(`Connected to: ${message.connected_channel}`, true);
+                } else {
+                    this.updateConnectionStatus('Not connected to any channel', false);
+                }
+
+                if (typeof message.is_listening !== 'undefined') {
+                    this.updateListeningStatus(message.is_listening);
+                }
+            }
+
+            handleStatusMessage(message) {
+                if (message.connected_channel) {
+                    this.updateConnectionStatus(`Connected to: ${message.connected_channel}`, true);
+                } else {
+                    this.updateConnectionStatus('Not connected to any channel', false);
+                }
+
+                if (typeof message.is_listening !== 'undefined') {
+                    this.updateListeningStatus(message.is_listening);
+                }
+            }
+
+            updateConnectionStatus(status, isConnected) {
                 this.connectionStatus.textContent = status;
-                this.connectionIndicator.className = `connection-indicator ${connected ? 'connected' : ''}`;
+                this.connectionStatus.className = isConnected ? 'connection-online' : 'connection-offline';
             }
 
             updateBotStatus(ready) {
                 console.log('Bot ready status:', ready);
+                this.botStatus.textContent = ready ? 'Online' : 'Offline';
+                this.botStatus.className = ready ? 'status-online' : 'status-offline';
+            }
+
+            updateVoiceConnectionStatus(data) {
+                const { connected, guild_name, channel_name } = data;
+
+                if (connected && guild_name && channel_name) {
+                    this.updateConnectionStatus(`Connected to ${channel_name} in ${guild_name}`, true);
+                } else {
+                    this.updateConnectionStatus('Not connected to any channel', false);
+                }
+            }
+
+            updateListeningStatus(isListening) {
+                // This method can be used if we want to show listening status in the future
+                console.log('Listening status:', isListening);
             }
 
             handleTranscription(data) {

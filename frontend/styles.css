@@ -1,5 +1,55 @@
 /* Discord-themed Dark UI for Piano Bot Translator */
 
+/* === Header and Top Bar Layout === */
+.header-section {
+    margin: 0 -10px 10px -10px;
+    /* Full width with negative margins to extend beyond container padding */
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 16px;
+    /* Move padding from h1 to header section for full-width background */
+    background-color: #2F3136;
+    /* Move background from h1 to header section */
+    border-radius: 4px;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+    border-left: 3px solid #7289DA;
+}
+
+.header-section h1 {
+    margin: 0;
+    /* Remove default margins since we're controlling spacing with the parent */
+    background: none;
+    /* Remove background since it's now on the parent */
+    padding: 0;
+    /* Remove padding since it's now on the parent */
+    box-shadow: none;
+    /* Remove shadow since it's now on the parent */
+    border: none;
+    /* Remove border since it's now on the parent */
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    /* Keep text shadow for readability */
+}
+
+.spectator-link {
+    color: #FFFFFF;
+    text-decoration: none;
+    padding: 8px 12px;
+    border: none;
+    border-radius: 3px;
+    font-size: 0.9rem;
+    background-color: #4F545C;
+    transition: all 0.2s ease;
+    font-weight: 500;
+    cursor: pointer;
+    font-family: 'Whitney', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+}
+
+.spectator-link:hover {
+    background-color: #5D6269;
+    transform: translateY(-1px);
+}
+
 /* === Base styles === */
 * {
     box-sizing: border-box;
@@ -597,4 +647,27 @@ input:checked+.toggle-slider:before {
         -webkit-font-smoothing: antialiased;
         -moz-osx-font-smoothing: grayscale;
     }
+}
+
+/* === Spectator View Styles === */
+.connection-indicator {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    margin-right: 8px;
+    background-color: #F04747;
+    /* Red for disconnected */
+}
+
+.connection-indicator.connected {
+    background-color: #43B581;
+    /* Green for connected */
+}
+
+.connection-status {
+    display: flex;
+    align-items: center;
+    font-size: 14px;
+    color: #DCDDDE;
 }
